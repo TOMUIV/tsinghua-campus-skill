@@ -36,41 +36,9 @@ LMIDS = {
 }
 
 
-def _ensure_login(page, user, pwd):
-    """info 登录（webvpn → CAS）。信任浏览器免 2FA。"""
-    page.goto(INFO_BASE, wait_until="load", timeout=45000)
-
-    time.sleep(6)
-    filled = False
-    for i in range(20):
-
-        time.sleep(3)
-        cur = page.url
-        if "id.tsinghua" not in cur and "webvpn" in cur:
-            return True
-        if "id.tsinghua" in cur and "/form/" in cur and not filled:
-            for k in range(8):
-                try:
-                    if page.evaluate("() => typeof window.doLogin === 'function'"):
-                        break
-                except Exception:
-                    pass
-
-            try:
-                if page.locator("#i_user").count() > 0:
-                    page.type("#i_user", user, delay=40)
-                    page.type("#i_pass", pwd, delay=40)
-                    page.evaluate("doLogin()")
-                    filled = True
-                    common.log("[info] CAS filled")
-            except Exception:
-                pass
-        if "login/check" in cur:
-            try:
-                login._click_trust(page)
-            except Exception:
-                pass
-    return False
+def _ensure_login(page, ctx):
+    """info 登录 —— 统一走 base-cas 会话复用（cookie 有效则免登录，失效才 CAS 填表）。"""
+    return login.ensure_login("info", page, ctx, home_url=INFO_BASE)
 
 
 def cmd_notices(category, limit):
@@ -83,7 +51,7 @@ def cmd_notices(category, limit):
     pw, b, ctx, page = browser.connect_cdp()
     page.on("dialog", lambda d: d.accept())
     try:
-        if not _ensure_login(page, user, pwd):
+        if not _ensure_login(page, ctx):
             common.output_json({"status": "error", "message": "info 登录失败"})
             sys.exit(1)
         common.log("[info] info 登录成功")
@@ -127,7 +95,7 @@ def cmd_read(xxid):
     pw, b, ctx, page = browser.connect_cdp()
     page.on("dialog", lambda d: d.accept())
     try:
-        if not _ensure_login(page, user, pwd):
+        if not _ensure_login(page, ctx):
             common.output_json({"status": "error", "message": "info 登录失败"})
             sys.exit(1)
         page.goto(INFO_BASE + f"/f/info/xxfb_fg/xnzx/template/detail?xxid={xxid}", wait_until="domcontentloaded", timeout=45000)

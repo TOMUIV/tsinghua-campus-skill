@@ -49,15 +49,14 @@ course.py --submit-captcha <token> <code>  # 图形验证码两阶段
 
 1. 确保 info 门户会话（`login.py --system info --ensure`）
 2. 访问 `xklogin.do`（webvpn http 编码 `eaff4b8b3f3b2653...`）→ 触发 CAS
-3. 等 `doLogin` 就绪（`wait_until="load"` + 轮询，SPA 需加载完）→ type 凭据 → doLogin()
-4. 信任浏览器自动过（或触发图形验证码 → 两阶段）
-5. 访问业务 URL 解析表格
+3. **登录统一走 base-cas**：`login.ensure_login("course", page, ctx, home_url=XKLOGIN, logged_in_check="() => location.href.indexOf('id.tsinghua') < 0", captcha_handler=...)` —— 注入 cookie 复用会话 → 失效才填 CAS → 偶发图形验证码由 `captcha_handler` 两阶段处理
+4. 访问业务 URL 解析表格
 
-> **登录要点**：CAS 是 SPA，必须 `wait_until="load"` + 等 `window.doLogin` 存在后再填表（`domcontentloaded` 时函数未加载导致登录失败）。填表用 `page.type`（真实键入触发 onChange），`page.fill` 可能不被受控组件读取。
+> **登录要点**：所有 CAS 填表集中在 `base-cas/scripts/login.py` 的 `ensure_login`，本 SKILL 不再自写登录。`ensure_login` 内部会等 `window.doLogin` 就绪再填表（SPA 需加载完），并自动处理 `login/check` 信任确认页。
 
 ### 会话失效处理
 
-- 每次访问走 `_auth`（goto xklogin → 若已登录直接进，否则 CAS）。
+- 每次访问走 `_auth` → `login.ensure_login`（注入 cookie → 已登录免登录 → 失效才 CAS 填表）。
 - 验证码 pending 时浏览器保持打开，`--submit-captcha` 连接同一浏览器填码。
 
 ### 边界

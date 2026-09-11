@@ -20,45 +20,11 @@ BASE = "https://its.tsinghua.edu.cn"
 SEARCH_URL = BASE + "/search.jsp?wbtreeid=1001"
 
 
-def _cas_login(page, base_cas_dir):
-    """在 CAS 登录页完成 its service 登录（信任浏览器免 2FA）。
-
-    用 base-cas 凭据填表；登录后 its 的 JSESSIONID 落在 profile，下次复用。
-    返回是否成功离开认证域。表单未出现（可能已登录/信任自动跳转）也视为成功。"""
-    try:
-        sys.path.insert(0, base_cas_dir)
-        import login as _login
-        # 若已离开认证域（信任浏览器自动完成）→ 成功
-        if "id.tsinghua" not in page.url:
-            return True
-        # 等待表单出现；超时可能因已登录或信任跳转
-        try:
-            page.wait_for_selector("#i_user", timeout=8000)
-        except Exception:
-            return "id.tsinghua" not in page.url
-        user = _login._get_cred("cas_username")
-        pwd = _login._get_cred("cas_password")
-        if not user or not pwd:
-            common.log("[its] CAS 凭据未配置")
-            return False
-        page.type("#i_user", user, delay=20)
-        page.type("#i_pass", pwd, delay=20)
-        page.evaluate("doLogin()")
-        for _ in range(20):
-            time.sleep(2)
-            cur = page.url
-            if "login/check" in cur:
-                try:
-                    _login._click_trust(page)
-                except Exception:
-                    pass
-            if "id.tsinghua" not in cur:
-                time.sleep(2)
-                return True
-        return "id.tsinghua" not in page.url
-    except Exception as e:
-        common.log(f"[its] CAS 登录异常: {e}")
-        return False
+def _cas_login(page, ctx, base_cas_dir):
+    """its service 登录 —— 统一走 base-cas 会话复用（cookie 有效则免登录）。"""
+    sys.path.insert(0, base_cas_dir)
+    import login as _login
+    return _login.ensure_login("its", page, ctx, home_url=BASE)
 
 
 def _fetch(query):
@@ -83,14 +49,10 @@ def _fetch(query):
             owned = True
             pw, b, ctx, page = _browser.connect_cdp()
         page.on("dialog", lambda d: d.accept())
-        # 先导航到 its 域（相对 URL 依赖当前页面 origin；CDP 默认 about:blank 会 fetch 失败）
-        page.goto(BASE, wait_until="domcontentloaded", timeout=20000)
-        if "id.tsinghua" in page.url:
-            # 需要 CAS 登录（信任浏览器通常直接成功）
-            if not _cas_login(page, base_cas_dir):
-                common.log("[its] CAS 登录失败，搜索返回空")
-                return None
-            page.goto(BASE, wait_until="domcontentloaded", timeout=20000)
+        # 统一走 base-cas 登录（导航 + cookie 复用 + 失效才填表）
+        if not _cas_login(page, ctx, base_cas_dir):
+            common.log("[its] CAS 登录失败，搜索返回空")
+            return None
         # 在浏览器页面里 fetch its 搜索（带 cookie）
         result = page.evaluate("""async (q) => {
             const r = await fetch('/search.jsp?wbtreeid=1001', {

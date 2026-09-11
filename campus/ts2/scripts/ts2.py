@@ -57,40 +57,10 @@ def _ensure_session():
     return {"status": "ok"}
 
 
-def _auth(page):
-    """CAS 登录第二成绩单系统。信任浏览器免 2FA。"""
-    try:
-        page.goto(TS_BASE, wait_until="load", timeout=45000)
-    except Exception as e:
-        return False, {"message": f"访问第二成绩单失败: {str(e)[:60]}"}
-    time.sleep(5)
-    user = login._get_cred("cas_username")
-    pwd = login._get_cred("cas_password")
-    if "id.tsinghua" in page.url:
-        # SPA 等 doLogin 就绪
-        for i in range(8):
-            if page.evaluate("() => typeof window.doLogin === 'function'"):
-                break
-            time.sleep(3)
-        try:
-            page.wait_for_selector("#i_user", timeout=10000)
-            page.type("#i_user", user, delay=40)
-            page.type("#i_pass", pwd, delay=40)
-            page.evaluate("doLogin()")
-        except Exception as e:
-            return False, {"message": f"CAS 填表异常: {str(e)[:60]}"}
-        for i in range(12):
-            time.sleep(2)
-            if "login/check" in page.url:
-                try:
-                    login._click_trust(page)
-                except Exception:
-                    pass
-            if "transcript.student" in page.url or "id.tsinghua" not in page.url:
-                time.sleep(3)
-                return True, {}
-        return False, {"message": "第二成绩单登录未完成（可能需要 2FA）"}
-    return True, {}
+def _auth(page, ctx):
+    """CAS 登录第二成绩单系统 —— 统一走 base-cas 会话复用（cookie 有效则免登录）。"""
+    ok = login.ensure_login("ts2", page, ctx, home_url=TS_BASE)
+    return (True, {}) if ok else (False, {"message": "第二成绩单登录未完成（可能需要 2FA）"})
 
 
 def _goto(page, path, settle=3):
@@ -163,7 +133,7 @@ def cmd_status():
     pw, b, ctx, page = browser.connect_cdp()
     page.on("dialog", lambda d: d.accept())
     try:
-        ok, err = _auth(page)
+        ok, err = _auth(page, ctx)
         if not ok:
             common.output_json({"status": "error", "message": err.get("message", "登录失败")})
             sys.exit(1)
@@ -185,7 +155,7 @@ def cmd_list(module="", status_filter=""):
     pw, b, ctx, page = browser.connect_cdp()
     page.on("dialog", lambda d: d.accept())
     try:
-        ok, err = _auth(page)
+        ok, err = _auth(page, ctx)
         if not ok:
             common.output_json({"status": "error", "message": err.get("message", "登录失败")})
             sys.exit(1)
@@ -232,7 +202,7 @@ def cmd_export(out_path=""):
     pw, b, ctx, page = browser.connect_cdp()
     page.on("dialog", lambda d: d.accept())
     try:
-        ok, err = _auth(page)
+        ok, err = _auth(page, ctx)
         if not ok:
             common.output_json({"status": "error", "message": err.get("message", "登录失败")})
             sys.exit(1)

@@ -225,6 +225,165 @@ def _click_trust(page):
         return False
 
 
+def _save_session_cookies(system, context):
+    """保存系统完整 cookie 快照（跨进程复用）。"""
+    try:
+        ck = context.cookies()
+        data = session.load_session(system) or {}
+        data["_cookies"] = ck
+        session.save_session(system, data)
+        common.log(f"[login] {system} cookie 快照已保存（{len(ck)} 条）")
+    except Exception as e:
+        common.log(f"[login] {system} 保存 cookie 失败: {e}")
+
+
+def ensure_login(system, page, context, home_url=None, logged_in_check=None, trigger_js=None,
+                 fill_timeout=20, captcha_handler=None):
+    """统一的页面登录（整页 CAS + iframe CAS），带 cookie 复用。
+
+    ⚠️ **所有子 SKILL 的登录必须走此函数，不得自己实现 CAS 填表。**
+
+    流程：
+      1. 注入 session 里保存的 cookie（`_cookies`）
+      2. 导航 home_url
+      3. 已登录（logged_in_check 为真，或默认：URL 在系统域且 body 无登录文案）→ 存 cookie 返回 True
+      4. 出现 CAS 表单（整页 `#i_user` 或 iframe `id.tsinghua`）→ 填表 → 存 cookie 返回 True
+      5. 失败返回 False
+
+    参数：
+      home_url: 系统主页（导航 + 判断登录态）
+      logged_in_check: 可选 JS 表达式（返回 bool）判断是否已登录
+      trigger_js: 可选 JS，触发登录入口（如 seat 需点"登录"才出现 CAS iframe）
+      fill_timeout: CAS 填表后等待登录成功的轮数（每轮 3s）
+    """
+    user = _get_cred("cas_username")
+    pwd = _get_cred("cas_password")
+
+    def _logged_in():
+        if logged_in_check:
+            try:
+                return bool(page.evaluate(logged_in_check))
+            except Exception:
+                return False
+        try:
+            host = home_url.split("/")[2] if home_url else ""
+            if not host or host not in page.url:
+                return False
+            body = page.inner_text("body")
+            return not any(m in body for m in ("用户密码登录", "二次认证", "二次验证"))
+        except Exception:
+            return False
+
+    def _fill_cas():
+        """填 CAS 表单（整页或 iframe）。返回是否已填。"""
+        # 整页 CAS
+        try:
+            if "id.tsinghua" in page.url and page.locator("#i_user").count() > 0:
+                for _ in range(8):
+                    try:
+                        if page.evaluate("() => typeof window.doLogin === 'function'"):
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(1)
+                page.fill("#i_user", user)
+                page.fill("#i_pass", pwd)
+                page.evaluate("doLogin()")
+                common.log(f"[login] {system} 整页 CAS 已填表")
+                return True
+        except SystemExit:
+            raise
+        except Exception:
+            pass
+        # iframe CAS
+        for fr in page.frames:
+            try:
+                if "id.tsinghua" in fr.url:
+                    for _ in range(8):
+                        try:
+                            if fr.evaluate("() => typeof window.doLogin === 'function'"):
+                                break
+                        except Exception:
+                            pass
+                        time.sleep(1)
+                    fr.fill("#i_user", user)
+                    fr.fill("#i_pass", pwd)
+                    fr.evaluate("doLogin()")
+                    common.log(f"[login] {system} iframe CAS 已填表")
+                    return True
+            except Exception:
+                pass
+        return False
+
+    # 1. 注入已保存 cookie（跨进程复用）
+    n = session.inject_cookies(context, system)
+    common.log(f"[login] {system} 注入 cookie {n} 条")
+    if home_url:
+        try:
+            page.goto(home_url, wait_until="domcontentloaded", timeout=45000)
+        except Exception:
+            pass
+        time.sleep(4)
+    # 2. 已登录？（cookie 有效 → 免登录）
+    for _ in range(4):
+        if _logged_in():
+            _save_session_cookies(system, context)
+            return True
+        time.sleep(2)
+    # 3. 触发登录入口（如 seat 需点"登录"才出现 CAS iframe）
+    if trigger_js:
+        try:
+            page.evaluate(trigger_js)
+            time.sleep(4)
+        except Exception:
+            pass
+    # 4. 未登录 → CAS 填表
+    filled = False
+    for _ in range(fill_timeout):
+        # 图形验证码（可选回调）：CAS 表单验证码【可见】时才需要，由调用方填码或 exit(2) 返回 pending
+        if captcha_handler is not None:
+            has_cap = False
+            try:
+                loc = page.locator("input[name=captcha], #captcha, input[placeholder*='验证码']")
+                for k in range(loc.count()):
+                    if loc.nth(k).is_visible():
+                        has_cap = True
+                        break
+            except Exception:
+                has_cap = False
+            if has_cap:
+                try:
+                    captcha_handler(page, context, system)
+                except SystemExit:
+                    raise
+                except Exception:
+                    pass
+                filled = False  # 含验证码 → 需重新填表
+        if not filled:
+            filled = _fill_cas()
+        # 信任确认页（login/check）
+        try:
+            if "login/check" in page.url:
+                _click_trust(page)
+        except Exception:
+            pass
+        if filled and _logged_in():
+            _save_session_cookies(system, context)
+            return True
+        time.sleep(3)
+    # 5. 再等一轮
+    for _ in range(5):
+        time.sleep(3)
+        if _logged_in():
+            _save_session_cookies(system, context)
+            return True
+    return False
+
+
+# 向后兼容别名
+ensure_iframe_cas = ensure_login
+
+
 def _extract_session(system, browser_obj, page, context=None):
     """按系统提取会话。
 

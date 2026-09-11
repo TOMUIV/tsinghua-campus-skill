@@ -52,39 +52,6 @@ CAB_SPACES = [
 ]
 
 
-def _iframe_cas_login(page, user, pwd, target_domain):
-    """处理 iframe 内嵌 CAS 登录（seat/cab 都是 iframe CAS）。
-
-    返回 True 若登录成功。
-    """
-    for i in range(15):
-        time.sleep(3)
-        for fr in page.frames:
-            try:
-                if "id.tsinghua" in fr.url:
-                    for k in range(8):
-                        try:
-                            if fr.evaluate("() => typeof window.doLogin === 'function'"):
-                                break
-                        except Exception:
-                            pass
-                        time.sleep(2)
-                    fr.fill("#i_user", user)
-                    fr.fill("#i_pass", pwd)
-                    fr.evaluate("doLogin()")
-                    common.log(f"[library] CAS 已填表（frame）")
-                    break
-            except Exception:
-                pass
-        try:
-            body = page.inner_text("body")
-            if target_domain in page.url and "用户密码登录" not in body:
-                return True
-        except Exception:
-            pass
-    return False
-
-
 # ---------- seat 余量 ----------
 def _parse_seat_areas(page):
     return page.evaluate("""() => {
@@ -199,12 +166,7 @@ def cmd_my_bookings():
     pw, b, ctx, page = browser.connect_cdp()
     page.on("dialog", lambda d: d.accept())
     try:
-        page.goto(SEAT_URL + "/home/web/f_second", wait_until="load", timeout=45000)
-        time.sleep(5)
-        # 点登录
-        page.evaluate("() => { const a = document.querySelector('a.login_click'); if (a) a.click(); }")
-        time.sleep(5)
-        if not _iframe_cas_login(page, user, pwd, "seat.lib"):
+        if not _seat_login(page, user, pwd, ctx):
             common.output_json({"status": "error", "message": "座位系统登录失败"})
             sys.exit(1)
         common.log("[library] seat 登录成功")
@@ -228,41 +190,11 @@ def _cab_login(page, user, pwd):
       - 已登录（信任浏览器）→ body 出现"个人中心"
       - 未登录 → Vue 注入 CAS iframe → 填表
     """
-    page.goto(CAB_URL, wait_until="domcontentloaded", timeout=45000)
-    filled = False
-    for i in range(20):
-        time.sleep(3)
-        try:
-            body = page.inner_text("body")
-        except Exception:
-            body = ""
-        has_login_ui = "个人中心" in body
-        # 处理 CAS frame（未登录时 Vue 注入）
-        for fr in page.frames:
-            try:
-                if "id.tsinghua" in fr.url and not filled:
-                    for k in range(8):
-                        try:
-                            if fr.evaluate("() => typeof window.doLogin === 'function'"):
-                                break
-                        except Exception:
-                            pass
-                        time.sleep(2)
-                    try:
-                        fr.fill("#i_user", user)
-                        fr.fill("#i_pass", pwd)
-                        fr.evaluate("doLogin()")
-                        filled = True
-                        common.log("[library] cab CAS 已填表")
-                    except Exception:
-                        pass
-                    break
-            except Exception:
-                pass
-        # 已登录判断：Vue ready 且出现"个人中心"
-        if has_login_ui and "用户密码登录" not in body:
-            return True
-    return False
+    return login.ensure_iframe_cas(
+        "cab", page, page.context,
+        home_url=CAB_URL,
+        logged_in_check="() => !!document.body && document.body.innerText.includes('个人中心')",
+    )
 
 
 def _click_space(page, space_name):
@@ -754,13 +686,17 @@ def cmd_rooms(space_filter="", date=None, as_csv=False):
 
 
 # ---------- 座位预约（book/cancel）----------
-def _seat_login(page, user, pwd):
-    """座位系统登录（iframe CAS）。返回 True 若成功。"""
-    page.goto(SEAT_URL + "/home/web/f_second", wait_until="load", timeout=45000)
-    time.sleep(5)
-    page.evaluate("() => { const a = document.querySelector('a.login_click'); if (a) a.click(); }")
-    time.sleep(5)
-    return _iframe_cas_login(page, user, pwd, "seat.lib")
+def _seat_login(page, user, pwd, context=None):
+    """座位系统登录 —— 走 base-cas 的 iframe CAS 会话复用（cookie 有效则免登录）。
+
+    cookie 快照存 base-cas session（runtime/sessions/seat.json），跨进程复用；
+    失效才 fallback 到 iframe CAS 填表。
+    """
+    return login.ensure_iframe_cas(
+        "seat", page, context or page.context,
+        home_url=SEAT_URL + "/home/web/f_second",
+        trigger_js="() => { const a = document.querySelector('a.login_click'); if (a) a.click(); }",
+    )
 
 
 def _seat_lookup(page, area_id, day="today"):

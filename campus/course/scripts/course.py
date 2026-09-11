@@ -96,9 +96,19 @@ def _save_captcha(page, token):
     import io
     common.runtime_dir("captcha").mkdir(parents=True, exist_ok=True)
     try:
-        # 优先截验证码图区域
-        el = page.query_selector("#captcha, img[src*='captcha'], .captcha")
-        if el:
+        # 优先截【可见】的验证码图区域（#captcha 常驻但仅需要时才可见）
+        el = None
+        for sel in ("#captcha", "img[src*='captcha']", "img[src*='Captcha']", ".captcha"):
+            for h in page.query_selector_all(sel):
+                try:
+                    if h.is_visible():
+                        el = h
+                        break
+                except Exception:
+                    pass
+            if el is not None:
+                break
+        if el is not None:
             el.screenshot(path=_captcha_path(token))
         else:
             page.screenshot(path=_captcha_path(token), full_page=False)
@@ -123,77 +133,41 @@ def _check_captcha(page):
         return False
 
 
-def _auth(page, user, pwd, captcha_token=None, captcha_code=None):
-    """选课系统 CAS 认证。返回 (ok, result)。
+def _auth(page, ctx, captcha_token=None, captcha_code=None):
+    """选课系统 CAS 认证 —— 统一走 base-cas 会话复用；图形验证码走 captcha_handler。
 
     captcha_token/code 提供时填入图形验证码后登录。
     """
-    try:
-        page.goto(XKLOGIN, wait_until="load", timeout=45000)
-    except Exception as e:
-        return False, {"message": f"访问选课系统失败: {str(e)[:60]}"}
-    time.sleep(6)
-    for i in range(8):
-        if "id.tsinghua" not in page.url:
-            return True, {}
-        if page.evaluate("() => typeof window.doLogin === 'function'"):
-            break
-        time.sleep(3)
-    if "id.tsinghua" not in page.url:
+    def _captcha(pg, context, system):
+        if captcha_token is None:
+            token = uuid.uuid4().hex[:12]
+            img = _save_captcha(pg, token)
+            _write_pending(token, {"token": token, "system": "course", "created": time.time(),
+                                   "captcha_image": img})
+            global _KEEP_BROWSER
+            _KEEP_BROWSER = True
+            common.output_json({
+                "status": "pending", "needs": "captcha", "pending": token,
+                "captcha_image": img,
+                "message": "选课系统 CAS 需图形验证码。浏览器已保持打开，请查看验证码图片后调用 course.py --submit-captcha <token> <code>",
+            })
+            sys.exit(2)
+        else:
+            try:
+                pg.fill("input[name=captcha], #captcha, input[placeholder*='验证码']", captcha_code)
+            except Exception:
+                pass
+
+    ok = login.ensure_login("course", page, ctx, home_url=XKLOGIN,
+                            logged_in_check="() => location.href.indexOf('id.tsinghua') < 0",
+                            captcha_handler=_captcha)
+    if ok:
         return True, {}
-    try:
-        page.wait_for_selector("#i_user", timeout=10000)
-        page.type("#i_user", user, delay=40)
-        page.type("#i_pass", pwd, delay=40)
-        # 若提供验证码，填入
-        if captcha_token and captcha_code:
-            c_sel = page.evaluate("""() => {
-                const el = document.querySelector('input[name=captcha], #captcha, input[placeholder*="验证码"]');
-                if (el) return '#' + el.id || el.name;
-                return null;
-            }""")
-            try:
-                page.fill("input[name=captcha], #captcha, input[placeholder*='验证码']", captcha_code)
-            except Exception:
-                pass
-        page.evaluate("doLogin()")
-        common.log("[course] doLogin called")
-    except Exception as e:
-        return False, {"message": f"CAS 填表异常: {str(e)[:80]}"}
-    for i in range(15):
-        time.sleep(2)
-        cur = page.url
-        if "login/check" in cur:
-            try:
-                login._click_trust(page)
-            except Exception:
-                pass
-        # 图形验证码检查（精确：有验证码元素）
-        if "id.tsinghua" in cur and _check_captcha(page):
-            common.log(f"[course] 检测到图形验证码（i={i}, url={cur[-40:]}）")
-            if captcha_token is None:
-                token = uuid.uuid4().hex[:12]
-                img = _save_captcha(page, token)
-                _write_pending(token, {"token": token, "system": "course", "created": time.time(),
-                                       "captcha_image": img})
-                global _KEEP_BROWSER
-                _KEEP_BROWSER = True
-                common.output_json({
-                    "status": "pending", "needs": "captcha", "pending": token,
-                    "captcha_image": img,
-                    "message": "选课系统 CAS 需图形验证码。浏览器已保持打开，请查看验证码图片后调用 course.py --submit-captcha <token> <code>",
-                })
-                sys.exit(2)
-            else:
-                # 已提交验证码但仍要求 → 验证码错误
-                return False, {"message": "验证码错误或已过期，请重试"}
-        if "id.tsinghua" not in cur:
-            return True, {}
     return False, {"message": "选课系统认证失败（可能验证码错误或系统不稳定）"}
 
 
 def _submit_captcha(token, code):
-    """阶段2：连接【同一浏览器】填图形验证码并 doLogin 完成登录。"""
+    """阶段2：连接【同一浏览器】填图形验证码完成登录（复用 _auth / ensure_login）。"""
     pending = _read_pending(token)
     if not pending:
         common.output_json({"status": "error", "message": f"pending 不存在或已过期: {token}"})
@@ -203,47 +177,25 @@ def _submit_captcha(token, code):
         sys.exit(1)
     pw, b, ctx, page = browser.connect_cdp()
     page.on("dialog", lambda d: d.accept())
-    # 当前页面应是验证码登录页
-    ok = _check_captcha(page)
+    ok, err = _auth(page, ctx, captcha_token=token, captcha_code=code)
     if not ok:
-        # 可能页面已跳走，重新触发
-        common.log("[course] 页面无验证码元素，重新加载登录页")
+        common.output_json({"status": "error", "message": err.get("message", "验证码登录失败")})
         try:
-            page.goto(XKLOGIN, wait_until="load", timeout=45000)
-            time.sleep(6)
+            pw.stop()
         except Exception:
             pass
-    try:
-        page.wait_for_selector("input[name=captcha], #captcha, input[placeholder*='验证码']", timeout=10000)
-        page.fill("input[name=captcha], #captcha, input[placeholder*='验证码']", code)
-        common.log(f"[course] 已填验证码 {code}")
-        page.evaluate("doLogin()")
-        common.log("[course] doLogin called")
-    except Exception as e:
-        common.log(f"[course] 填验证码异常: {e}")
-        common.output_json({"status": "error", "message": f"填验证码失败: {str(e)[:80]}"})
-        pw.stop()
         sys.exit(1)
-    for i in range(15):
-        time.sleep(2)
-        cur = page.url
-        if "login/check" in cur:
-            try:
-                login._click_trust(page)
-            except Exception:
-                pass
-        if "id.tsinghua" not in cur:
-            common.log(f"[course] 验证码登录成功 -> {cur[:70]}")
-            try:
-                os.remove(_pending_path(token))
-            except Exception:
-                pass
-            common.output_json({"status": "ok", "message": "选课系统认证成功！请重新执行查询命令（如 course.py teacher --query 数学）"})
-            pw.stop()
-            sys.exit(0)
-    common.output_json({"status": "error", "message": "验证码提交后认证未完成（可能验证码错误或系统不稳定）"})
-    pw.stop()
-    sys.exit(1)
+    common.log("[course] 验证码登录成功")
+    try:
+        os.remove(_pending_path(token))
+    except Exception:
+        pass
+    common.output_json({"status": "ok", "message": "选课系统认证成功！请重新执行查询命令（如 course.py teacher --query 数学）"})
+    try:
+        pw.stop()
+    except Exception:
+        pass
+    sys.exit(0)
 
 
 def _goto_biz(page, path):
@@ -290,7 +242,7 @@ def cmd_teacher(query=""):
     page.on("dialog", lambda d: d.accept())
     keep_browser = False
     try:
-        ok, err = _auth(page, user, pwd)
+        ok, err = _auth(page, ctx)
         if not ok:
             common.output_json({"status": "error", "message": err.get("message", "认证失败")})
             sys.exit(1)
@@ -324,7 +276,7 @@ def cmd_enrolled():
     pw, b, ctx, page = browser.connect_cdp()
     page.on("dialog", lambda d: d.accept())
     try:
-        ok, err = _auth(page, user, pwd)
+        ok, err = _auth(page, ctx)
         if not ok:
             common.output_json({"status": "error", "message": err.get("message", "认证失败")})
             sys.exit(1)
