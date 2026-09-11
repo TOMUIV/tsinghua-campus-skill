@@ -2,13 +2,18 @@
 
 整合清华大学图书馆多个子系统：
 - seat.lib（座位）：实时余量（公开）+ 座位分布（公开）+ 我的预约记录（登录）
-- cab.lib（研读间/研讨间）：空间占用状态（登录）
+- cab.lib（研读间/研讨间）：空间占用状态（登录，走内部 API /ic-web/）
 
 用法:
   library.py seat [--area 北馆]      # 座位余量（公开，无需登录）
   library.py areas [--area 北馆]     # 座位分布：馆→楼层→区域→总/不可用/剩余（公开）
   library.py my-bookings            # 我的座位预约记录（需登录）
-  library.py rooms [--space 北馆单人研读间]  # 研读间占用状态（需登录）
+  library.py rooms [--space 北馆团体研讨间（二层）]  # 研读间占用状态（需登录，API）
+
+cab 内部 API（逆向，base=https://cab.lib.tsinghua.edu.cn/ic-web/）:
+  查询: roomMenu(公开) / roomDevice/roomInfos / home/page/room/idle / seatDevice/resvStatus
+  预约: POST reserve | reserve/bulkAdd; 改约 reserve/update; 取消 reserve/endReserve
+  登录: CAS SSO（auth/address → CAS；登录态靠 cookie）
 """
 import sys
 import os
@@ -274,33 +279,438 @@ def _click_space(page, space_name):
         return False
 
 
-def _parse_rooms(page):
-    """解析研读间占用状态（从"预约状态"标记后开始，提取房间+占用者）。"""
-    body = page.inner_text("body")
-    idx = body.find("预约状态")
-    if idx >= 0:
-        body = body[idx:]
-    lines = [l.strip() for l in body.split("\n") if l.strip()]
+def _cab_api(page, path, method="GET", params=None):
+    """调用 cab 内部 API（/ic-web/...），带登录态 cookie。
+
+    在页面上下文用 fetch（自动带 cookie + hiddenReferer）。返回解析后的 dict。
+    """
+    return page.evaluate("""async (args) => {
+        const {path, method, params} = args;
+        const opt = {method: method, credentials: 'include',
+                     headers: {'X-Requested-With': 'XMLHttpRequest',
+                               'Content-Type': 'application/json; charset=UTF-8'}};
+        if (method === 'GET' && params) {
+            const qs = new URLSearchParams(params).toString();
+            const r = await fetch('/ic-web/' + path + (qs ? '?' + qs : ''), opt);
+            return await r.text();
+        }
+        if (params) opt.body = JSON.stringify(params);
+        const r = await fetch('/ic-web/' + path, opt);
+        return await r.text();
+    }""", {"path": path, "method": method, "params": params or {}})
+
+
+def _cab_roommenu(page):
+    """获取研读间/研讨间空间列表（公开接口）。返回 [{kindId, kindName}]。"""
+    raw = _cab_api(page, "roomMenu")
+    try:
+        d = json.loads(raw)
+    except Exception:
+        return []
+    if d.get("code") != 0:
+        return []
+    return [{"kindId": x.get("kindId"), "kindName": x.get("kindName")} for x in (d.get("data") or [])]
+
+
+def _cab_walk_roominfos(node, out):
+    """递归遍历 roomDevice/roomInfos 响应，提取 [{kindName, roomInfos:[...]}]。
+
+    实测结构：data=[{kindName, roomInfos:[{devId, devName, minResvTime,
+        openTimes:[{openStartTime,openEndTime}], resvInfos:[{resvBeginTime,
+        resvEndTime,resvStatus,trueName}]}]}]
+    """
+    if isinstance(node, dict):
+        ris = node.get("roomInfos")
+        if isinstance(ris, list) and ris and isinstance(ris[0], dict) and "devId" in ris[0]:
+            out.append({"kindName": node.get("kindName") or node.get("name") or "",
+                        "rooms": ris})
+        for v in node.values():
+            _cab_walk_roominfos(v, out)
+    elif isinstance(node, list):
+        for v in node:
+            _cab_walk_roominfos(v, out)
+
+
+def _cab_room_status(page, space_name, date=None):
+    """查某空间某天的房间占用（reserve GET 接口，含预约人脱敏姓名）。
+
+    实测：GET /ic-web/reserve?sysKind=1&resvDates=YYYYMMDD&page=1&pageSize=N&kindIds=<kindId>&labId=
+    → data=[{devId, devName, kindName, labName, openStart, openEnd, resvRule, resvInfo:[{
+        title, trueName(脱敏 张*嘉), logonName(脱敏 2***3), startTime(epoch ms),
+        endTime, resvStatus, resvId}]}]
+
+    返回 (kind, rooms, raw)。
+    """
+    import datetime
+    menu = _cab_roommenu(page)
+    kind = None
+    for m in menu:
+        if space_name and (space_name in m["kindName"] or m["kindName"] in space_name):
+            kind = m
+            break
+    if kind is None and menu:
+        kind = menu[0]
+    day = date or datetime.datetime.now().strftime("%Y%m%d")
+    raw = _cab_api(page, "reserve", params={
+        "sysKind": 1, "resvDates": day, "page": 1, "pageSize": 30,
+        "kindIds": (kind or {}).get("kindId", ""), "labId": "",
+    })
+    try:
+        d = json.loads(raw)
+    except Exception:
+        return kind, [], raw
+    if d.get("code") != 0:
+        return kind, [], raw
+
+    def _ts(ms):
+        try:
+            return datetime.datetime.fromtimestamp(int(ms) / 1000).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return str(ms)
+
     rooms = []
-    cur_room = None
-    for l in lines:
-        # 房间行：如 "北馆3F-01  (北馆单人间(三层))"
-        if re.match(r"^[\u5317\u897f\u6587\u6cd5]\u9986?3?F?\d", l) or re.match(r"^[\u5317\u897f\u6587\u6cd5][\u4e2d\u5317\u897f\u6587\u6cd5]*3F", l):
-            if cur_room:
-                rooms.append(cur_room)
-            cur_room = {"room": l.split("(")[0].strip(), "occupied": []}
-        elif cur_room and l and len(l) <= 5 and not l.isdigit() and ":" not in l and not l.startswith("20") and l not in (
-                "周一", "周二", "周三", "周四", "周五", "周六", "周日", "今日", "上周", "下周", "日期", "名称",
-                "预约状态", "预约须知", "实景展示", "楼层筛选", "名称筛选", "已预约", "非开放预约时段"):
-            # 占用者姓名（如 程*）
-            if any('\u4e00' <= ch <= '\u9fff' for ch in l):
-                cur_room["occupied"].append(l)
-    if cur_room:
-        rooms.append(cur_room)
-    return rooms
+    for r in (d.get("data") or []):
+        resv = []
+        for ri in (r.get("resvInfo") or []):
+            resv.append({
+                "who": ri.get("trueName") or "",       # 脱敏姓名（系统默认 张*嘉）
+                "account": ri.get("logonName") or "",   # 脱敏学号
+                "uuid": ri.get("uuid") or "",
+                "resvId": ri.get("resvId"),
+                "title": ri.get("title") or "",
+                "start": _ts(ri.get("startTime")),
+                "end": _ts(ri.get("endTime")),
+                "status": _decode_resv_status(ri.get("resvStatus")),
+                "status_raw": ri.get("resvStatus"),
+            })
+        rooms.append({
+            "room": r.get("devName"),
+            "devId": r.get("devId"),
+            "group": r.get("kindName"),
+            "lab": r.get("labName"),
+            "open": f"{r.get('openStart','')}-{r.get('openEnd','')}",
+            "min_resv_min": (r.get("resvRule") or {}).get("minResvTime"),
+            "max_resv_min": (r.get("resvRule") or {}).get("maxResvTime"),
+            "resv": resv,
+        })
+    return kind, rooms, raw
 
 
-def cmd_rooms(space_filter=""):
+# resvStatus 位掩码（来自 SPA statusOption 注释）
+_RESV_STATUS = {2: "待生效", 4: "已生效/使用中", 16: "已违约", 128: "已结束",
+                256: "待审核", 512: "审核未通过", 1024: "审核通过", 2048: "已暂离"}
+
+
+def _decode_resv_status(s):
+    if s is None:
+        return "?"
+    names = [v for k, v in _RESV_STATUS.items() if s & k]
+    return "|".join(names) if names else str(s)
+
+
+def _cab_my_info(page):
+    """当前登录用户信息（accNo/trueName/学号）。"""
+    try:
+        d = json.loads(_cab_api(page, "auth/userInfo"))
+        if d.get("code") == 0:
+            return d.get("data") or {}
+    except Exception:
+        pass
+    return {}
+
+
+def _cab_resolve_members(page, names):
+    """姓名列表 → [{name, accNo, logonName, dept}]（account/getMembers?key=）。"""
+    out = []
+    for nm in names:
+        nm = nm.strip()
+        if not nm:
+            continue
+        try:
+            d = json.loads(_cab_api(page, "account/getMembers",
+                                    params={"key": nm, "page": 1, "pageNum": 10}))
+        except Exception:
+            d = {}
+        hits = d.get("data") or []
+        if hits:
+            h = hits[0]
+            out.append({"name": nm, "accNo": h.get("accNo"),
+                        "logonName": h.get("logonName"), "dept": h.get("deptName"),
+                        "matched": len(hits)})
+        else:
+            out.append({"name": nm, "accNo": None, "error": "未找到"})
+    return out
+
+
+def _cab_find_free_room(page, kind_id, date, start, end, room_filter=""):
+    """在 kindId 空间下找 date 日 [start,end] 全空闲的房间。返回 (room_dict, all_rooms)。
+
+    room_filter：只考虑房名包含该串的房间（如 "F2-29"）。
+    """
+    d = json.loads(_cab_api(page, "reserve", params={
+        "sysKind": 1, "resvDates": date, "page": 1, "pageSize": 50,
+        "kindIds": kind_id, "labId": "",
+    }))
+    if d.get("code") != 0:
+        return None, []
+    import datetime as _dt
+    all_rooms = []
+    for r in (d.get("data") or []):
+        if room_filter and room_filter not in (r.get("devName") or ""):
+            continue
+        occ = []
+        for ri in (r.get("resvInfo") or []):
+            s = _dt.datetime.fromtimestamp(ri["startTime"] / 1000)
+            e = _dt.datetime.fromtimestamp(ri["endTime"] / 1000)
+            occ.append((s, e))
+        info = {"room": r.get("devName"), "devId": r.get("devId"),
+                "minUser": r.get("minUser"), "maxUser": r.get("maxUser"),
+                "occupied": [(x.strftime("%H:%M"), y.strftime("%H:%M")) for x, y in occ]}
+        all_rooms.append(info)
+        ds = _dt.datetime.strptime(f"{date} {start}", "%Y%m%d %H:%M")
+        de = _dt.datetime.strptime(f"{date} {end}", "%Y%m%d %H:%M")
+        blocked = any(s < de and e > ds for s, e in occ)
+        if not blocked:
+            return info, all_rooms
+    return None, all_rooms
+
+
+def cmd_book_room(space_filter="", date=None, start="", end="", members="", title="", confirm=False, room_filter=""):
+    """预约团体研讨间（写操作，需 --confirm）。
+
+    流程：登录 → 解析空间 kindId → 找 [start,end] 空闲房间 → 解析成员 accNo
+         → POST /ic-web/reserve/bulkAdd。
+    不带 --confirm 时仅 dry-run（展示将预约的房间/成员/时间，不提交）。
+    """
+    import datetime
+    user = login._get_cred("cas_username")
+    pwd = login._get_cred("cas_password")
+    if not user or not pwd:
+        common.output_json({"status": "error", "message": "CAS 凭据未配置"})
+        sys.exit(1)
+    if not (date and start and end):
+        common.output_json({"status": "error", "message": "需要 --date YYYYMMDD --start HH:MM --end HH:MM"})
+        sys.exit(1)
+    member_names = [m.strip() for m in members.split(",") if m.strip()]
+    if not member_names:
+        common.output_json({"status": "error", "message": "需要 --members 姓名1,姓名2,..."})
+        sys.exit(1)
+
+    browser.start_cdp(headed=False)
+    pw, b, ctx, page = browser.connect_cdp()
+    page.on("dialog", lambda d: d.accept())
+    try:
+        if not _cab_login(page, user, pwd):
+            common.output_json({"status": "error", "message": "研读间系统登录失败"})
+            sys.exit(1)
+        me = _cab_my_info(page)
+        space = space_filter or "北馆团体研讨间（二层）"
+        menu = _cab_roommenu(page)
+        kind = next((m for m in menu if space in m["kindName"] or m["kindName"] in space), None)
+        if not kind:
+            common.output_json({"status": "error", "message": f"未找到空间 {space}", "spaces": menu})
+            sys.exit(1)
+        room, all_rooms = _cab_find_free_room(page, kind["kindId"], date, start, end, room_filter)
+        resolved = _cab_resolve_members(page, member_names)
+        missing = [r["name"] for r in resolved if not r.get("accNo")]
+        plan = {
+            "space": kind, "date": date, "start": start, "end": end,
+            "room": room, "members": resolved,
+            "requester": {"name": me.get("trueName"), "accNo": me.get("accNo")},
+        }
+        if missing:
+            common.output_json({"status": "error", "message": f"成员未找到: {missing}", "plan": plan})
+            sys.exit(1)
+        if not room:
+            common.output_json({"status": "error", "message": f"{space} 在 {date} {start}-{end} 无空闲房间",
+                                "plan": plan, "all_rooms": all_rooms})
+            sys.exit(1)
+        if not confirm:
+            common.output_json({"status": "ok", "type": "book_room_dry_run",
+                                "message": "dry-run：加 --confirm 才提交", "plan": plan})
+            return
+        # 提交
+        acc_list = [me.get("accNo")] + [r["accNo"] for r in resolved if r["accNo"] != me.get("accNo")]
+        payload = {
+            "resvBeginTime": f"{date[:4]}-{date[4:6]}-{date[6:]} {start}:00",
+            "resvEndTime": f"{date[:4]}-{date[4:6]}-{date[6:]} {end}:00",
+            "sysKind": 1, "appAccNo": me.get("accNo"),
+            "memberKind": 2 if len(acc_list) > 1 else 1,
+            "testName": title or "", "resvKind": 2, "resvProperty": 32,
+            "appUrl": "", "resvMember": acc_list, "resvDev": [room["devId"]],
+            "memo": "", "captcha": "", "addServices": [],
+        }
+        r = json.loads(_cab_api(page, "reserve", method="POST", params=payload))
+        common.output_json({"status": "ok" if r.get("code") == 0 else "error",
+                            "type": "book_room", "submitted": payload, "response": r})
+    finally:
+        try:
+            browser.stop_cdp()
+        except Exception:
+            pass
+
+
+def cmd_cancel_room(uuid="", confirm=False):
+    """取消研讨间预约（写操作，需 --confirm）。
+
+    端点：POST /ic-web/reserve/delete，body {"uuid": "<预约uuid>"}。
+    uuid 从 `rooms` 输出的 resv[].uuid 获取。
+    """
+    if not uuid:
+        common.output_json({"status": "error", "message": "需要 --uuid <预约uuid>（见 rooms 输出的 resv[].uuid）"})
+        sys.exit(1)
+    user = login._get_cred("cas_username")
+    pwd = login._get_cred("cas_password")
+    if not user or not pwd:
+        common.output_json({"status": "error", "message": "CAS 凭据未配置"})
+        sys.exit(1)
+    if not confirm:
+        common.output_json({"status": "ok", "type": "cancel_room_dry_run",
+                            "message": "dry-run：加 --confirm 才取消", "uuid": uuid})
+        return
+    browser.start_cdp(headed=False)
+    pw, b, ctx, page = browser.connect_cdp()
+    page.on("dialog", lambda d: d.accept())
+    try:
+        if not _cab_login(page, user, pwd):
+            common.output_json({"status": "error", "message": "研读间系统登录失败"})
+            sys.exit(1)
+        r = json.loads(_cab_api(page, "reserve/delete", method="POST", params={"uuid": uuid}))
+        common.output_json({"status": "ok" if r.get("code") == 0 else "error",
+                            "type": "cancel_room", "uuid": uuid, "response": r})
+    finally:
+        try:
+            browser.stop_cdp()
+        except Exception:
+            pass
+
+
+def _hm2m(s):
+    h, mi = s.split(":")
+    return int(h) * 60 + int(mi)
+
+def _m2hm(m):
+    return f"{m//60:02d}:{m%60:02d}"
+
+
+def cmd_free(date=None, min_hours=4, space_filter="", as_csv=False,
+             room_filter="", min_user=0, free_start="", free_end="", free_after=""):
+    """列出各空间房间的【空闲时段】（占用 dump + 空闲窗口分析）。
+
+    date 默认今天；min_hours 过滤出可连续预约 ≥N 小时的窗口（默认 4）。
+    as_csv=True 输出 CSV（便于后续分析/Excel）。
+    筛选：room_filter 房名含该串；min_user 容量≥N（maxUser）；free_start/free_end
+         只保留覆盖 [free_start,free_end] 的窗口；free_after 只保留起点≥该时间的窗口。
+    """
+    import datetime
+    user = login._get_cred("cas_username")
+    pwd = login._get_cred("cas_password")
+    if not user or not pwd:
+        common.output_json({"status": "error", "message": "CAS 凭据未配置"})
+        sys.exit(1)
+    browser.start_cdp(headed=False)
+    pw, b, ctx, page = browser.connect_cdp()
+    page.on("dialog", lambda d: d.accept())
+    try:
+        if not _cab_login(page, user, pwd):
+            common.output_json({"status": "error", "message": "研读间系统登录失败"})
+            sys.exit(1)
+        day = date or datetime.datetime.now().strftime("%Y%m%d")
+        menu = _cab_roommenu(page)
+        spaces_out = []
+        for sp in menu:
+            if space_filter and space_filter not in sp["kindName"]:
+                continue
+            data = None
+            for _attempt in range(4):
+                try:
+                    r = json.loads(_cab_api(page, "reserve", params={
+                        "sysKind": 1, "resvDates": day, "page": 1, "pageSize": 50,
+                        "kindIds": sp["kindId"], "labId": "",
+                    }))
+                except Exception:
+                    r = {"code": -1}
+                if r.get("code") == 0:
+                    data = r.get("data") or []
+                    break
+                time.sleep(1.5)
+            if data is None:
+                spaces_out.append({"space": sp["kindName"], "error": "查询失败"})
+                continue
+            rooms_out = []
+            for room in data:
+                if room_filter and room_filter not in (room.get("devName") or ""):
+                    continue
+                if min_user and (room.get("maxUser") or 0) < min_user:
+                    continue
+                open_m = _hm2m(room.get("openStart") or "08:00")
+                close_m = _hm2m(room.get("openEnd") or "22:00")
+                occ = []
+                for ri in (room.get("resvInfo") or []):
+                    s = datetime.datetime.fromtimestamp(ri["startTime"] / 1000)
+                    e = datetime.datetime.fromtimestamp(ri["endTime"] / 1000)
+                    occ.append((_hm2m(s.strftime("%H:%M")), _hm2m(e.strftime("%H:%M"))))
+                occ.sort()
+                # 空闲窗口 = 开放时段 − 占用
+                free = []
+                cur = open_m
+                for s, e in occ:
+                    if s > cur:
+                        free.append((cur, s))
+                    cur = max(cur, e)
+                if cur < close_m:
+                    free.append((cur, close_m))
+                free_h = [(a, b) for a, b in free if b - a >= min_hours * 60]
+                # 额外筛选：覆盖 [free_start,free_end] / 起点≥free_after
+                if free_start or free_end or free_after:
+                    need_a = _hm2m(free_start) if free_start else None
+                    need_b = _hm2m(free_end or free_start) if (free_start or free_end) else None
+                    after_m = _hm2m(free_after) if free_after else None
+
+                    def _ok(win):
+                        a, b = win
+                        if need_a is not None and not (a <= need_a and b >= need_b):
+                            return False
+                        if after_m is not None and a < after_m:
+                            return False
+                        return True
+                    free_h = [w for w in free_h if _ok(w)]
+                rooms_out.append({
+                    "room": room.get("devName"), "devId": room.get("devId"),
+                    "open": f"{_m2hm(open_m)}-{_m2hm(close_m)}",
+                    "minUser": room.get("minUser"), "maxUser": room.get("maxUser"),
+                    "booked": [{"start": _m2hm(s), "end": _m2hm(e)} for s, e in occ],
+                    "free_ge_min": [{"start": _m2hm(a), "end": _m2hm(b), "hours": round((b - a) / 60, 1)}
+                                    for a, b in free_h],
+                })
+            spaces_out.append({"space": sp["kindName"], "kindId": sp["kindId"], "rooms": rooms_out})
+        if as_csv:
+            import csv as _csv
+            import io as _io
+            buf = _io.StringIO()
+            w = _csv.writer(buf)
+            w.writerow(["space", "room", "devId", "minUser", "maxUser", "open",
+                        "booked", "free_ge_minh"])
+            for sp in spaces_out:
+                if sp.get("error"):
+                    w.writerow([sp["space"], "", "", "", "", "", "", ""]); continue
+                for r in sp.get("rooms", []):
+                    booked = ";".join(f"{x['start']}-{x['end']}" for x in (r.get("booked") or []))
+                    freeg = ";".join(f"{x['start']}-{x['end']}" for x in (r.get("free_ge_min") or []))
+                    w.writerow([sp["space"], r.get("room"), r.get("devId"), r.get("minUser"),
+                                r.get("maxUser"), r.get("open"), booked, freeg])
+            sys.stdout.write(buf.getvalue())
+            return
+        common.output_json({"status": "ok", "type": "free", "date": day,
+                            "min_hours": min_hours, "spaces": spaces_out})
+    finally:
+        try:
+            browser.stop_cdp()
+        except Exception:
+            pass
+
+
+def cmd_rooms(space_filter="", date=None, as_csv=False):
     user = login._get_cred("cas_username")
     pwd = login._get_cred("cas_password")
     if not user or not pwd:
@@ -314,15 +724,28 @@ def cmd_rooms(space_filter=""):
             common.output_json({"status": "error", "message": "研读间系统登录失败"})
             sys.exit(1)
         common.log("[library] cab 登录成功")
-        # 默认用北馆单人研读间；space_filter 模糊匹配
-        space = space_filter or "北馆单人研读间"
-        clicked = _click_space(page, space)
-        if not clicked:
-            common.output_json({"status": "error", "message": f"未找到空间 {space}"})
+        space = space_filter or "北馆团体研讨间（二层）"
+        kind, rooms, raw = _cab_room_status(page, space, date)
+        if not rooms:
+            common.output_json({"status": "error", "message": f"未获取到房间状态（空间={space}）",
+                                "kind": kind, "raw_head": (raw or "")[:400]})
             sys.exit(1)
-        time.sleep(15)
-        rooms = _parse_rooms(page)
-        common.output_json({"status": "ok", "type": "rooms", "space": space, "rooms": rooms})
+        if as_csv:
+            import csv as _csv, io as _io
+            buf = _io.StringIO()
+            w = _csv.writer(buf)
+            w.writerow(["space", "room", "devId", "open", "who", "account", "uuid", "resvId", "start", "end", "status", "status_raw"])
+            for r in rooms:
+                for v in (r.get("resv") or []):
+                    w.writerow([r.get("group"), r.get("room"), r.get("devId"), r.get("open"),
+                                v.get("who"), v.get("account"), v.get("uuid"), v.get("resvId"),
+                                v.get("start"), v.get("end"),
+                                v.get("status"), v.get("status_raw")])
+            sys.stdout.write(buf.getvalue())
+            return
+        common.output_json({"status": "ok", "type": "rooms", "space": kind,
+                            "date": date or "today",
+                            "room_count": len(rooms), "rooms": rooms})
     finally:
         try:
             browser.stop_cdp()
@@ -680,14 +1103,27 @@ def cmd_cancel(booking_id="", userid="", access_token="", confirm=False):
 
 def main():
     ap = argparse.ArgumentParser(description="图书馆综合查询")
-    ap.add_argument("cmd", choices=["seat", "areas", "my-bookings", "rooms", "book", "cancel"])
+    ap.add_argument("cmd", choices=["seat", "areas", "my-bookings", "rooms", "free", "book", "book-room", "cancel", "cancel-room"])
     ap.add_argument("--area", default="", help="seat/areas/book: 馆区筛选")
     ap.add_argument("--floor", default="", help="book: 楼层筛选")
     ap.add_argument("--region", default="", help="book: 区域筛选")
     ap.add_argument("--seat", default="", help="book: 座位号（如 NF2A001）")
     ap.add_argument("--id", default="", help="cancel: 预约内部id")
-    ap.add_argument("--space", default="", help="rooms: 研读间空间名")
-    ap.add_argument("--confirm", action="store_true", help="book/cancel: 确认执行写操作（预约/取消）。不带则仅预览。")
+    ap.add_argument("--space", default="", help="rooms/book-room: 研读间空间名")
+    ap.add_argument("--date", default="", help="rooms/book-room: 日期 YYYYMMDD（默认今天）")
+    ap.add_argument("--start", default="", help="book-room: 开始时间 HH:MM")
+    ap.add_argument("--end", default="", help="book-room: 结束时间 HH:MM")
+    ap.add_argument("--members", default="", help="book-room: 成员姓名，逗号分隔（含预约人）")
+    ap.add_argument("--title", default="", help="book-room: 主题（可选）")
+    ap.add_argument("--min-hours", type=float, default=4, help="free: 只列出可连续预约 ≥N 小时的空闲窗口（默认 4）")
+    ap.add_argument("--csv", action="store_true", help="rooms/free: 输出 CSV（便于分析/Excel）")
+    ap.add_argument("--room", default="", help="book-room/free: 房间名关键词（如 F2-29）")
+    ap.add_argument("--uuid", default="", help="cancel-room: 预约 uuid（见 rooms 输出的 resv[].uuid）")
+    ap.add_argument("--min-user", type=int, default=0, help="free: 只保留容量（maxUser）≥N 的房间")
+    ap.add_argument("--free-start", default="", help="free: 只保留覆盖该起始时刻的窗口 HH:MM")
+    ap.add_argument("--free-end", default="", help="free: 配合 --free-start，覆盖到该时刻")
+    ap.add_argument("--free-after", default="", help="free: 只保留起点 ≥ 该时刻的窗口 HH:MM")
+    ap.add_argument("--confirm", action="store_true", help="book/book-room/cancel: 确认执行写操作。不带则仅预览。")
     args = ap.parse_args()
     if args.cmd == "seat":
         cmd_seat(args.area)
@@ -696,7 +1132,14 @@ def main():
     elif args.cmd == "my-bookings":
         cmd_my_bookings()
     elif args.cmd == "rooms":
-        cmd_rooms(args.space)
+        cmd_rooms(args.space, args.date or None, args.csv)
+    elif args.cmd == "free":
+        cmd_free(args.date or None, args.min_hours, args.space, args.csv,
+                 args.room, args.min_user, args.free_start, args.free_end, args.free_after)
+    elif args.cmd == "book-room":
+        cmd_book_room(args.space, args.date or None, args.start, args.end, args.members, args.title, args.confirm, args.room)
+    elif args.cmd == "cancel-room":
+        cmd_cancel_room(args.uuid, args.confirm)
     elif args.cmd == "book":
         cmd_book(args.area, args.floor, args.region, args.seat, args.confirm)
     elif args.cmd == "cancel":

@@ -118,14 +118,167 @@ discover 点"统一认证" → www.metaauth.com/211030/login.html（302）
 - 检索 API endpoint 未逆出（需从前端 chunk JS 找）
 - discover 有"其它账号登录"（本地账号）但实测只有统一认证可用
 
-## 四、后续同学接手建议
+## 四、cab 研读间/研讨间内部 API（逆向，2026-09-11）
+
+> cab.lib.tsinghua.edu.cn 是 **Vue SPA**（"Information Commons"，图书馆空间预约系统）。
+> 之前 `library.py rooms` 靠**文本抓取**（点空间→解析页面文字），脆弱。已改为**内部 API**。
+
+### 架构
+- SPA 入口 `https://cab.lib.tsinghua.edu.cn/`（`config/config.js` → `window.g.ApiUrl = '/ic-web'`）
+- 所有 API：`https://cab.lib.tsinghua.edu.cn/ic-web/<path>`，`withCredentials`（cookie 会话）
+- 请求头需 `X-Requested-With: XMLHttpRequest`、`Content-Type: application/json; charset=UTF-8`
+- 登录：**CAS 单点登录**（`window.g.loginMode = 2`）；未登录时 API 返回 `{"code":300,"message":"用户未登录，请重新登录"}`
+- `hiddenReferer: true`（部分请求不带 referer）
+
+### 登录流程
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `auth/address` | GET | 返回 CAS 跳转地址（带 service）|
+| `auth/userInfo` | GET | 当前用户信息（300=未登录）|
+| `login/publicKey` | GET | RSA 公钥（密码加密用）|
+| `login/user` | POST | 账号密码登录（loginMode=1 时用）|
+| `login/signOut` | POST | 登出 |
+| `sysConfig/public` | GET | 公开系统配置（**无需登录**）|
+
+> cab 实际用 iframe CAS（Vue 注入 `id.tsinghua` frame）；`_cab_login` 已在 library.py 实现（遍历 frames 填表）。
+
+### 查询端点
+| 端点 | 方法 | 登录 | 说明 |
+|------|------|:---:|------|
+| `roomMenu` | GET | ❌公开 | **空间种类列表** → `[{kindId, kindName}]` |
+| `reserve` | GET | ✅ | **房间占用 + 预约人**（SPA 时间线用；**含脱敏姓名**）|
+| `roomDevice/roomInfos` | GET | ✅ | 房间占用（**仅时间段+状态，无姓名**）|
+| `home/page/room/idle` | GET | ✅ | 空闲房间统计 |
+| `seatDevice/resvStatus` | GET | 部分 | `{available, used}` 统计 |
+| `seatRoom/open` / `seatRoom/openScope` | GET | ✅ | 房间开放时段 |
+| `reserve/areaInfo` / `reserve/seatArea` / `/room/openTimes` | GET | ✅ | 区域/座位/开放时间 |
+
+**⭐ `reserve` GET（含预约人，SPA 时间线用）**：
+```
+GET /ic-web/reserve?sysKind=1&resvDates=YYYYMMDD&page=1&pageSize=30&kindIds=<kindId>&labId=
+```
+响应 `data=[{devId, devName, kindName, labName, openStart, openEnd,
+  resvRule:{minResvTime,maxResvTime,...}, resvInfo:[{
+    title, trueName(脱敏 张*嘉), logonName(脱敏 2***3),
+    startTime(epoch ms), endTime, resvStatus, resvId, uuid}]}]`
+- **`trueName` = 预约人姓名（系统已脱敏：姓*名）**
+- **`logonName` = 学号（系统已脱敏：2********3）**
+- `startTime`/`endTime` 是 epoch 毫秒，需转换
+- `minUser`/`maxUser`（如 3~10 人）、`resvRule.minResvTime/maxResvTime`（30/240 分钟）
+- ⚠️ **隐私**：姓名/学号虽已脱敏，仍是个人信息，面向用户输出须遵守 SKILL 隐私铁律
+
+> 对比：`roomDevice/roomInfos` 的 `resvInfos` **只有** `resvBeginTime/resvEndTime/resvStatus`（无姓名）；要姓名必须用 `reserve`。
+
+**`roomMenu` 实测返回的 9 个空间（kindId）**：
+```
+北馆单人研读间（三层）        2071759
+北馆团体研讨间（二层）        2071757   ← "F2 04" 即此空间 2 层 04 号房间
+西馆高山音乐研讨间（中208）   11825707
+西馆流水音乐研讨间（中210）   11832983
+文科馆单人研读间（三层）      10312
+文科馆团体研讨间（二层）      10314
+法律馆单人研读间（四层）      10048995
+法律馆研讨舱（四层、五层)     12149594
+法律馆双人舱（五层)           12149595
+```
+
+**`roomDevice/roomInfos` 响应结构（✅ 实测已验证）**：
+```json
+{"code":0,"message":"查询成功","data":[
+  {"kindName":"北馆团体研讨间（二层）","roomInfos":[
+    {"devId":2071787,"devName":"北馆2F-04","minResvTime":30,
+     "openTimes":[{"openStartTime":"08:00","openEndTime":"22:00","openLimit":1}],
+     "resvInfos":[{"resvBeginTime":"2026-09-11 08:00:00","resvEndTime":"2026-09-11 12:00:00","resvStatus":1109}]}
+  ]}
+]}
+```
+- `data` = 9 个空间（kindName），每个含 `roomInfos`（房间列表）
+- 房间：`devId`（预约用）/ `devName`（如"北馆2F-04"）/ `minResvTime` / `openTimes` / `resvInfos`
+- `resvInfos`：`resvBeginTime`/`resvEndTime`/`resvStatus`（**不含姓名**，非管理员看不到）
+- `resvStatus` 位掩码：`2`待生效 `4`已生效/使用中 `16`已违约 `128`已结束 `256`待审核 `512`审核未通过 `1024`审核通过 `2048`已暂离
+  - 实测值 `1093`=1024+64+4+1（审核通过+已生效）；`1027`=1024+2+1（审核通过+待生效）；`1109`=1024+64+16+4+1（审核通过+已生效+已违约）
+
+**`home/page/room/idle` 响应（✅ 实测）**：每个空间的空闲/总数
+```json
+{"code":0,"data":[{"name":"北馆团体研讨间（二层）","idelQuantity":0,"totalQuantity":4}, ...]}
+```
+（注意拼写是 `idelQuantity`）
+
+**北馆团体研讨间（二层）房间**（kindId=2071757）：
+| 房间 | devId |
+|------|-------|
+| 北馆2F-01 | 2071799 |
+| 北馆2F-02 | 2071795 |
+| 北馆2F-03 | 2071791 |
+| **北馆2F-04** | **2071787** |
+
+### 预约端点（写操作，需登录 + 授权）
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| **`reserve`** | **POST** | **单次预约（研讨间实际用这个！body=JSON payload）** |
+| **`reserve/delete`** | **POST** | **取消预约（body `{"uuid":"<预约uuid>"}`）✅ 实测"删除成功"** |
+| `reserve/endAhaed` | POST | 提前结束（body `{"uuid":...}`）|
+| `reserve/endReserve` | POST | 签离（body `{"resvId":...}`）|
+| `reserve/update` | POST | 改约 |
+| `reserve/endList` | GET | 我的结束列表 |
+| `reserve/time/expand` | POST | 续时 |
+| `reserve/time/expand/duration` | GET | 续时时长 |
+| `reserve/count` | GET | 我的预约计数 |
+| `resvMember/operate` | POST | 成员操作 |
+| `reserve/operate/rec` | GET | 操作记录（权限不足）|
+| `account/getMembers` | GET | **成员搜索 `?key=<姓名>&page=1&pageNum=10` → `[{accNo, logonName, deptName}]`** |
+
+> **取消端点辨析**：`handleDelete`（取消按钮）→ `POST reserve/delete`（`{uuid}`）；`endReserve`（签离）用 `{resvId}`；`endAhaed`（提前结束）用 `{uuid}`。**取消用 `reserve/delete`**。
+
+### ⚠️ 预约规则（实测）
+1. **一人一天最多 4 小时**（同一用户当天累计 ≤240min）
+2. **不能连续预约**：同一用户已有某时段，不能订**紧接的连续时段**（换房间也不行）→ `{"code":1,"message":"不能连续预约"}`
+3. 时段冲突 → `{"code":1,"message":"设备在该时间段内已被预约"}`
+4. 需按时签到，违约影响权限
+5. `resvRule`：`minResvTime:30` / `maxResvTime:240`（30min~4h）
+
+**预约 payload（从 SPA `handleSubmit` 提取）**：
+```json
+{
+  "resvBeginTime": "YYYY-MM-DD HH:mm:00",
+  "resvEndTime":   "YYYY-MM-DD HH:mm:00",
+  "sysKind": 1,
+  "appAccNo": "<学号>",
+  "memberKind": 1,
+  "testName": "<主题>",
+  "resvKind": 2,
+  "resvProperty": 32,
+  "appUrl": "",
+  "resvMember": ["<学号>"],
+  "resvDev": ["<房间 devId>"],
+  "memo": "",
+  "captcha": "",
+  "addServices": []
+}
+```
+- `resvDev` = 房间的设备 id（从 `roomDevice/roomInfos` 的 `devId` 拿）
+- 当日预约时 `resvBeginTime` 会被前端改成"当前时间+1 分钟"
+
+### 实现
+- `library.py` 新增 `_cab_api`（页面上下文 fetch，带 cookie）+ `_cab_roommenu` + `_cab_room_status`
+- `cmd_rooms` 改为：登录 → `roomMenu` 找 kindId → `roomDevice/roomInfos` 取房间状态 → 返回结构化 JSON
+- 预约写操作**未实现**（高风险，需用户明确授权 + 图形验证码 `captcha`）
+
+### 踩坑
+- **cdp_profile 损坏**（2026-09-11）：`skill/campus/runtime/profiles/cdp_profile` 膨胀到 663MB 后，chrome 启动即崩（打印 "DevTools listening" 后退出，CDP 端口不可用）。
+  - **修复**：备份重命名为 `cdp_profile_broken_20260911` → chrome 重建新 profile（~10MB）→ 重新 CAS 登录（一次 2FA）→ 恢复正常。
+  - 教训：profile 异常膨胀时应及时清理/重建。
+- **登录验证流程**：新 profile 未信任 → base-cas `login.py --system learn --ensure` 触发 2FA → 用户给码 → `--submit-code` → 信任建立（profile 级）→ cab iframe CAS 自动登录。
+
+## 五、后续同学接手建议
 
 1. **discover 借阅记录**：校内网环境用 Playwright 原生 launch 单次登录 → 抓 `/user/index/book`（借阅）或续借 API
 2. **水木搜索检索**：抓 chunk JS 找 `/tsinghuasearch/...` 检索 endpoint（Primo search）
 3. **座位预约/研读间预约（写操作）**：选座流程（地图/时间格交互）+ 高风险，需用户明确授权
 4. **选座机制**：seat 选座是 `/home/web/f_second` 点馆区 → 座位地图；cab 研读间是时间格拖拽选择
+5. **cab 研讨间**：API 已逆出（见第四节）；待办 = 修复 cdp_profile + 登录后核实 `roomDevice/roomInfos` 响应结构 + 实现预约写操作（需 captcha）
 
-## 五、相关文件
+## 六、相关文件
 
 - `skill/campus/library/scripts/library.py` — 主脚本（seat 余量 + my-bookings + rooms）
 - `skill/campus/library/scripts/discover_login.py` — discover 两阶段登录（当前受限）

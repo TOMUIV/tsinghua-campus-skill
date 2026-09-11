@@ -34,7 +34,10 @@ metadata:
 library.py seat [--area 北馆]         # 座位余量（公开，无需登录）
 library.py areas [--area 北馆]        # 座位分布：馆→楼层→区域→总/不可用/剩余（公开）
 library.py my-bookings               # 我的座位预约记录（需登录）
-library.py rooms [--space 空间名]      # 研读间占用状态（需登录）
+library.py rooms [--space 空间名] [--date YYYYMMDD]  # 研读间占用 + 预约人（脱敏，需登录）
+library.py free [--date YYYYMMDD] [--min-hours 4] [--space 关键词] [--csv]  # 各房间【已预约时段 dump + 空闲窗口分析】；--csv 输出 CSV（供分析）
+library.py book-room --space 文科馆团体研讨间 --date YYYYMMDD --start 14:00 --end 18:00 --members 姓名1,姓名2,姓名3 [--room F2-29] [--title 主题] [--confirm]  # 预约研讨间（写操作，需 --confirm；不带则 dry-run；--room 指定房间，缺省自动选第一个空闲）
+library.py cancel-room --uuid <预约uuid> [--confirm]  # 取消研讨间预约（uuid 见 rooms 输出的 resv[].uuid）
 library.py book --area 北馆 [--floor 二层] [--region A] [--seat NF2A001]  # 选座+预约（需登录；需 CAS 登录，耗时约 1-3 分钟，shell 超时设 ≥180s）
 library.py cancel [--id <预约id>]     # 取消预约（需登录，无 id 列出可取消）
 ```
@@ -104,9 +107,23 @@ AI:
 - **座位分布**：**公开 API** `seat.lib.tsinghua.edu.cn/api.php/v3areas/<馆区id>`（馆→楼层→区域树，含 TotalCount/UnavailableSpace），无需登录。馆区 id：35北馆/64西馆/89文科/6法律/19美术/29金融
 - **座位登录**：点"登录"→ **iframe 内嵌 CAS**，遍历 `page.frames` 找 `id.tsinghua` frame → `fr.fill("#i_user")` + `fr.evaluate("doLogin()")`（信任浏览器免 2FA）
 - **我的预约**：`seat.lib.tsinghua.edu.cn/user/index/book`（预约号/空间/起止时间/状态）
-- **研读间**：`cab.lib.tsinghua.edu.cn`（Vue SPA），iframe CAS 登录 → 首页**真实点击**空间（`page.click("text=空间名")` 触发 Vue 路由）→ `#/ic/researchSpace/...` 占用视图（房间 + 占用者）
+- **研读间**：`cab.lib.tsinghua.edu.cn`（Vue SPA "Information Commons"），iframe CAS 登录后走**内部 API** `/ic-web/`：
+  - `roomMenu`（公开）→ 空间种类 + kindId（北馆团体研讨间二层 = `2071757`）
+  - **`reserve?sysKind=1&resvDates=YYYYMMDD&kindIds=<kindId>`（登录）→ 房间占用 + 预约人（`trueName` 脱敏"张*嘉" + `logonName` 脱敏学号）** —— `rooms` 命令用此接口
+  - `roomDevice/roomInfos`（登录）→ 房间占用（仅时间段+状态，无姓名）
+  - 预约提交 = **`POST /ic-web/reserve`**（JSON body，payload 见 `../docs/library-reverse-notes.md`）；成员搜索 = `account/getMembers?key=<姓名>`；**无需验证码**（resvCode=0）
+  - 取消 = **`POST /ic-web/reserve/delete`**（body `{"uuid":"<预约uuid>"}`）；uuid 见 `rooms` 输出 `resv[].uuid`
+  - 提前结束 = `POST /ic-web/reserve/endAhaed`（body `{"uuid":...}`）；签离 = `POST /ic-web/reserve/endReserve`（body `{"resvId":...}`）
+  - 未登录 API 返回 `{"code":300,"message":"用户未登录，请重新登录"}`
 
-> 登录要点：seat/cab 都是 iframe 内嵌 CAS（非整页跳转），必须遍历 `page.frames` 填表。研读间空间点击用真实 `page.click`（Vue SPA 需真实交互）。
+> ⚠️ **研读间预约规则（重要）**：
+> - **一人一天最多预约 4 小时**（同一用户同一天累计时长 ≤240 分钟）
+> - **不能连续预约**：同一用户已有某时段预约时，不能再订**紧接的连续时段**（如已订 14:00-18:00，则不能订 18:00-22:00，**即使换房间也不行**）→ 报 `{"code":1,"message":"不能连续预约"}`
+> - 时段冲突 → `{"code":1,"message":"设备在该时间段内已被预约"}`
+> - 预约需按时**签到**（北馆团体研讨间等），违约影响后续权限
+> - **写操作铁律**：`book-room`/`cancel-room` 必须带 `--confirm`；预约前先 dry-run 并向用户 double check
+
+> 登录要点：seat/cab 都是 iframe 内嵌 CAS（非整页跳转），必须遍历 `page.frames` 填表。研读间占用查询走内部 API（`roomMenu` + `roomDevice/roomInfos`），不再靠文本抓取。
 
 ### ⚠️ 座位预约铁律（AI 必须遵守，否则用户会吃亏）
 
@@ -162,7 +179,8 @@ AI:
 - **座位预约 book/cancel 已实现**：查楼层/区域/时间段/可选座位 → 预约 → 取消。
 - ⚠️ **写操作红线**：book/cancel 是写操作，AI 必须遵守上方"座位预约铁律"（预约前 double check、30 分钟签到、取消每日 1 次、违规暂停 3 天）。
 - 取消当日超 1 次 → 系统返回"当日取消次数已达上限"。
-- **研读间预约（写操作）未实现**——cab 时间条拖拽选时间（Vue 交互），headless 驱动不稳定；占用查询（rooms）已可用。逆向笔记见 `../docs/library-reverse-notes.md`（预约 API 已定位为 `/ic-web/reserve/bulkAdd`）。
+- **研读间占用查询（rooms）已改为内部 API**：`roomMenu`（找 kindId）+ `roomDevice/roomInfos`（房间占用）；`--space` 支持模糊匹配（如 `北馆团体研讨间`）。
+- **研读间预约（写操作）未实现**——API 已定位（`POST /ic-web/reserve/bulkAdd`，payload 见逆向笔记），但需房间 `devId` + 图形验证码 `captcha` + 用户明确授权，暂不自动执行。逆向笔记见 `../docs/library-reverse-notes.md`。
 - "我的图书馆"（discover.lib 借阅记录）登录走第三方认证（metaauth/yuntaigo 裸 http，被 CDP Chrome 拦截 `ERR_BLOCKED_BY_CLIENT`），且 CAS casservice 入口 login/check 页在 CDP 下加载失败（chrome-error）。完整攻破笔记见 `../docs/library-reverse-notes.md`。
 
 ---

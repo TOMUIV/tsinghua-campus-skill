@@ -106,6 +106,7 @@ metadata:
 - ✅ library 图书馆（座位/研读间）
 - ✅ mail 邮件
 - ✅ info 校内通知/馆藏检索
+- ✅ amap 高德地图（地点/POI/周边/路径/地理编码/天气）
 
 **Bug 自修授权**：遇到 bug（脚本报错、接口变更、登录失效、数据拿不到）时，**AI 可以自行修改本技能包代码来修复**，不必等用户。但：
 
@@ -137,6 +138,8 @@ Step 5: 全部就绪 → 告诉用户"已初始化完成，可以说'查看待�
 | `student_name` | ⬜ | 姓名（作业命名） | 同上 |
 | `scopus_api_key` | ⬜ | Elsevier 申请的 Scopus Key | 文献检索（literature）；不配则该功能不可用 |
 | `scopus_inst_token` | ⬜ | 图书馆申请的机构 Token | 文献检索配额提升（可选增强） |
+| `OPENALEX_API_KEY` | ⬜ | openalex.org/settings/api 免费 Key | OpenAlex 高级额度（不配也能用，但限流严） |
+| `AMAP_KEY` | ⬜ | 高德开放平台 lbs.amap.com Web 服务 Key | 地图/POI/路径/天气/地理编码（不配则 amap 不可用） |
 | `deepseek_api_key` | ⬜ | DeepSeek API Key | learn 预批改 / 文献摘要（可选） |
 | `MAIL_ACCOUNTS` | ⬜ | 邮箱 IMAP/SMTP 授权码（写 campus/.env） | 收发邮件（mail） |
 
@@ -156,9 +159,10 @@ Step 5: 全部就绪 → 告诉用户"已初始化完成，可以说'查看待�
   第二成绩单   → ts2 SKILL（子）
   图书馆/座位  → library SKILL（子）
   邮箱         → mail SKILL（子）
-  文献检索     → literature SKILL（子）
+  文献检索     → literature SKILL（子，4 源：Scopus/arXiv/OpenAlex/Crossref）
   校内通知     → info SKILL（子）
   搜校园信息   → search SKILL（子）
+  地图/POI/路径/天气 → amap SKILL（子）
   意图不明     → 列出能力范围，不瞎猜
 ```
 

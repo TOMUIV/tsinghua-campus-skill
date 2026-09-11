@@ -1,6 +1,6 @@
 ---
 name: campus
-description: 清华校园服务技能包（统一入口）。涵盖网络学堂/课表/成绩/培养方案/第二成绩单/选课/邮箱/文献/图书馆/座位预约/研读间/校内通知/水木搜索 等校园事务。当用户提到"校园服务、网络学堂、作业、课表、成绩、邮箱、文献、图书馆、座位、研读间、校内通知、搜书"等需求时使用。第一次使用需先初始化（install → creds → login → 统一 .env）。
+description: 清华校园服务技能包（统一入口）。涵盖网络学堂/课表/成绩/培养方案/第二成绩单/选课/邮箱/文献/图书馆/座位预约/研读间/校内通知/水木搜索/高德地图 等校园事务。当用户提到"校园服务、网络学堂、作业、课表、成绩、邮箱、文献、图书馆、座位、研读间、校内通知、搜书、地图、路径、清华附近吃饭"等需求时使用。第一次使用需先初始化（install → creds → login → 统一 .env）。
 metadata:
   openclaw:
     requires:
@@ -31,7 +31,7 @@ metadata:
 
 ### ⚠️ 版本与自修声明（完整版见根 `SKILL.md` 新手指引 Caveat）
 
-- 本技能包仍在迭代中，主功能已测试可用（learn/search/literature/timetable/transcript/program/course/ts2/library/mail/info）
+- 本技能包仍在迭代中，主功能已测试可用（learn/search/literature/timetable/transcript/program/course/ts2/library/mail/info/amap）
 - 遇到 bug（脚本报错/接口变更/登录失效）时，**AI 可自行修改本包代码修复**，不必等用户
 - 约束：只改出问题的模块，**禁止动已测试通过的核心路径**（install/creds/base-cas 底座）
 - 回归：修复后跑 `tests/smoke_test.py` + 实测一次真实数据
@@ -68,10 +68,12 @@ metadata:
   培养方案/学分 → program SKILL（子）
   选课/已选课程 → course SKILL（子）
   第二成绩单/课外经历 → ts2 SKILL（子）
-  图书馆/座位/研读间 → library SKILL（子）
-  邮箱       → mail SKILL（子）
-  文献检索   → literature SKILL（子）
+  图书馆/座位/研读间 → library SKILL（子，含研读间占用+预约人）
+邮箱       → mail SKILL（子）
+  文献检索   → literature SKILL（子，4 源：Scopus/arXiv/OpenAlex/Crossref）
+  校内通知   → info SKILL（子）
   图书馆座位 → library SKILL（子）
+  地图/POI/路径/天气/地理编码 → amap SKILL（子）
   校内通知   → info SKILL（子）
   意图不明   → 列出能力范围，不瞎猜
 ```
@@ -109,7 +111,7 @@ metadata:
 | base-cas | `base-cas/scripts/login.py --system X --ensure` | CAS 登录（两阶段） |
 | base-cas | `base-cas/scripts/session.py --list` | 查看各系统 session |
 | search | `search/scripts/search.py --query <词>` | 多源搜索（info/its/learn） |
-| literature | `literature/scripts/literature.py search -q <检索式>` | 文献检索（Scopus 共享底座） |
+| literature | `literature/scripts/literature.py search -q <检索式> [--source scopus|arxiv|openalex|crossref|all]` | 多源文献检索（4 源，免费源 arxiv/openalex/crossref 不需 Key） |
 | timetable | `timetable/scripts/timetable.py` | 课表查询 |
 | transcript | `transcript/scripts/transcript.py` | 成绩单查询 |
 | program | `program/scripts/program.py` | 培养方案查询 |
@@ -130,6 +132,8 @@ metadata:
 | **CAS**（id.tsinghua.edu.cn） | learn / info / timetable / library | `cas_username` / `cas_password` | 清华统一认证登录（共用一套） |
 | **CAS**（可选） | learn | `student_id` / `student_name` | 作业文件命名（缺省用 CAS 账号） |
 | **文献**（api.elsevier.com） | literature | `scopus_api_key`（+`scopus_inst_token` 可选） | Scopus 文献检索鉴权/提配额 |
+| **OpenAlex**（api.openalex.org） | literature | `OPENALEX_API_KEY`（可选，免费源无 key 也能用） | OpenAlex 元数据检索高级额度 |
+| **高德**（restapi.amap.com） | amap | `AMAP_KEY`（统一 .env） | 高德地图 Web 服务 API（地点/POI/路径/天气/地理编码） |
 | **LLM**（api.deepseek.com） | learn 预批改 / literature 摘要 | `deepseek_api_key` | LLM 摘要/预批改（可选） |
 | **邮件**（IMAP/SMTP） | mail | `MAIL_ACCOUNTS`（统一 .env） | 收发邮件 |
 
@@ -156,7 +160,7 @@ Step 5: 全部就绪 → 告诉用户"已初始化完成，可以说'查看待�
 |---------|------|------|------|
 | learn | `learn/` | 查待办/交作业/下载课件/成绩/AI预批改 | ✅ 已实现 |
 | search | `search/` | 多源搜索（info 通知/its 服务/learn 课件，结果带来源） | ✅ 已实现 |
-| literature | `literature/` | 多源文献检索/摘要/引用 | ✅ 已实现 |
+| literature | `literature/` | 多源文献检索/摘要/引用（Scopus/arXiv/OpenAlex/Crossref） | ✅ 已实现 |
 | timetable | `timetable/` | 课表查询（星期×节次 + 未安排课程） | ✅ 已实现 |
 | transcript | `transcript/` | 成绩单（全部课程成绩 + 总学分/绩点） | ✅ 已实现 |
 | program | `program/` | 培养方案完成情况（课组完成度 + 应修/完成学分） | ✅ 已实现 |
@@ -165,6 +169,7 @@ Step 5: 全部就绪 → 告诉用户"已初始化完成，可以说'查看待�
 | library | `library/` | 图书馆（座位余量/分布公开 + 选座预约 book/cancel + 我的预约 + 研读间占用） | ✅ 已实现 |
 | mail | `mail/` | 收发邮件（配置在统一 campus/.env） | ✅ 已实现 |
 | info | `info/` | 校内通知查询 + 水木搜索（馆藏检索） | ✅ 已实现 |
+| amap | `amap/` | 高德地图（地点/POI/周边/路径规划/地理编码/天气/IP/行政区划/距离/静态地图） | ✅ 已实现 |
 
 > `course` 选课系统：登录链路已逆向（含验证码两阶段），`enrolled` 已选课程可用；开课信息/评教按学期开放，非选课季锁定。完整逆向笔记见 `../docs/course-reverse-notes.md`（供后续同学接手）。
 > 第二成绩单（`ts2/`）已实现：课外经历 19 模块查询 + 填报状态，直连无需 webvpn，全年可用。
@@ -196,13 +201,18 @@ Step 5: 全部就绪 → 告诉用户"已初始化完成，可以说'查看待�
 - **"我选了哪些课"** — 选课查询（需校内网）
 - **"我的第二成绩单"** / "课外经历" — 第二成绩单（保研/简历）
 - **"图书馆还有座位吗"** / "研读间有空吗" — 座位余量/研读间占用
+- **"谁订了北馆二楼研讨间"** / "研讨间预约情况" — 研读间/研讨间占用 + 预约人（脱敏，`library.py rooms --space <空间> [--date YYYYMMDD]`）
+- **"明天哪里能约 4 小时研讨间"** / "哪些研讨间有空" — 各房间已预约时段 + 空闲窗口分析（`library.py free [--date YYYYMMDD] [--min-hours N]`）
+- **"帮我约研讨间"** — 预约团体研讨间（写操作，需确认；`library.py book-room ... --confirm`）
+  - ⚠️ 规则：**一人一天最多 4H**；**不能连续预约**（已有 14-18 则不能订 18-22，换房间也不行）；取消用 `library.py cancel-room --uuid <uuid> --confirm`
 - **"帮我预约个座位"** / "取消预约" — 座位预约/取消（写操作，需确认）
 - **"看邮件"** / "有什么新邮件" — 收发邮件
 - **"最近有什么通知"** / "放假安排" — 校内通知
 - **"帮我搜本书"** / "图书馆有 XX 吗" — 水木搜索馆藏检索
-- **"帮我查文献"** — 多源文献检索
+- **"帮我查文献"** — 多源文献检索（Scopus/arXiv/OpenAlex/Crossref）
 - **"图书馆还有座位吗"** — 座位预约查询
 - **"最近校内有什么通知"** — 信息查询
+- **"清华主楼附近有什么吃的"** / "从主楼到六教怎么走" / "海淀今天天气" — 高德地图（地点/POI/周边/路径/天气）
 
 ### 第一次使用
 
