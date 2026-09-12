@@ -1,15 +1,6 @@
 # 敏感文件（绝不出设备）
 campus/.env
-campus/runtime/credentials.json
-campus/runtime/sessions/
-campus/runtime/browser/
-campus/runtime/pending/
-campus/runtime/logs/
-
-# 运行时产物（可再生成）
-campus/runtime/profiles/
-campus/runtime/downloads/
-campus/runtime/*.log
+campus/runtime/
 
 # Python
 __pycache__/
@@ -17,3 +8,4 @@ __pycache__/
 
 # 临时输出
 campus/output/
+campus/tmp/
