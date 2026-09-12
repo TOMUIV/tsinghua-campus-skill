@@ -82,7 +82,7 @@ metadata:
 
 | 入口 | 管什么 | 范围 |
 |------|--------|------|
-| `creds.py reset <system>` | **凭据存储层**：某系统域的 keyring key（cas/literature/mail/llm 各自独立） | 只清凭据，不动登录态 |
+| `creds.py reset <system>` | **凭据存储层**：加密保险箱中该域条目（cas/literature/mail/llm 各自独立） | 只清凭据，不动登录态 |
 | `login.py --reset` | **CAS 登录层**：CAS 凭据 + learn/info session + CDP 浏览器 profile | 只清 CAS，文献/邮件/LLM 凭据保留 |
 
 > 原因：`creds.py` 是所有系统的**凭据仓库**（能按系统单独管理）；`login.py` 只管 **CAS 认证**（含登录态 session/profile），所以它的 reset 只覆盖 CAS 系统。想重置某个非 CAS 系统（如文献 key），用 `creds.py reset literature`。
@@ -123,7 +123,7 @@ metadata:
 
 > 开发文档：`../docs/subskill-template.md`、`../docs/learn-verify.md`、`../docs/handoff.md`
 
-### 各子 SKILL 所需凭据（按系统分组，向用户索取，全部存 keyring）
+### 各子 SKILL 所需凭据（按系统分组，向用户索取，全部存加密保险箱）
 
 > 📄 AI 配置指引：`skill/campus/CREDS.md`（按系统拆分，含各域 key/用途/申请途径/配置命令，供 LLM 指导配置）
 
@@ -137,7 +137,9 @@ metadata:
 | **LLM**（api.deepseek.com） | learn 预批改 / literature 摘要 | `deepseek_api_key` | LLM 摘要/预批改（可选） |
 | **邮件**（IMAP/SMTP） | mail | `MAIL_ACCOUNTS`（统一 .env） | 收发邮件 |
 
-> **配置双轨**：CAS 等安全凭据走 `creds.py`/keyring（加密存储）；邮箱等用户级大配置统一在 `campus/.env`（见 `.env.example`，含学号/姓名/CAS/邮箱/API key）。两者都被 git 忽略，不出设备。
+> **凭据存储（加密保险箱）**：CAS 等安全凭据走 `creds.py`，全部存进**单个加密保险箱** `campus/runtime/credentials.enc`（Fernet 加密的 JSON）。解密只需**一个主密钥**，来源优先级：① 环境变量 `CAMPUS_MASTER_KEY`（跨机同步用）② OS keyring 单条（本机绑定，自动生成）③ `campus/runtime/vault/master.key`（0600，兜底）。邮箱等用户级大配置统一在 `campus/.env`（见 `.env.example`）。两者都被 git 忽略，不出设备。
+>
+> **跨机同步**：保险箱文件随 SKILL 文件夹同步；在新设备设同一个 `CAMPUS_MASTER_KEY`（`creds.py key show` 可在旧设备读出，`creds.py key set` 可显式设置）即可解密。没有主密钥则保险箱无法解开（文件夹泄露 ≠ 凭据泄露）。
 
 ### 初始化流程（AI 首次面对新用户）
 
@@ -151,7 +153,7 @@ Step 4: base-cas login.py --system learn --ensure → 验证 CAS
 Step 5: 全部就绪 → 告诉用户"已初始化完成，可以说'查看待办'等"
 ```
 
-> **凭据输入铁律（隐私）**：用户提供的账号/密码**必须**经 `creds.py add <key> --value-stdin` 的 stdin 直传（值只在内存 → keyring DPAPI 加密）。**禁止**先写临时 JSON/文件再读（那会产生明文落盘窗口）。PowerShell 下管道传中文/特殊字符已实测无损（`$OutputEncoding` 设 UTF-8；脚本已做 BOM/\r\n 清理）。对话历史中的明文无法避免，但磁盘不留明文。
+> **凭据输入铁律（隐私）**：用户提供的账号/密码**必须**经 `creds.py add <key> --value-stdin` 的 stdin 直传（值只在内存 → 写入加密保险箱 `credentials.enc`）。**禁止**先写临时 JSON/文件再读（那会产生明文落盘窗口）。PowerShell 下管道传中文/特殊字符已实测无损（`$OutputEncoding` 设 UTF-8；脚本已做 BOM/\r\n 清理）。对话历史中的明文无法避免，但磁盘不留明文。
 > 用户前提：机器已装 Python 3.10+。若连 Python 都没有，告知用户先装 Python（产品假设，不自动装）。
 
 ### 各子 SKILL 入口
@@ -223,5 +225,6 @@ Step 5: 全部就绪 → 告诉用户"已初始化完成，可以说'查看待�
 
 ### 隐私说明
 
-- 你的凭据使用**操作系统安全存储 API** 加密（凭据管理器/Keychain/Secret Service），安全性很高，且仅存本机、不出设备
+- 你的凭据整体加密存进**单个保险箱文件**（AES 加密），解密用的**主密钥**存在系统安全存储（凭据管理器/Keychain/Secret Service）或环境变量 `CAMPUS_MASTER_KEY`；DLL 与文件夹里都看不到明文
+- 保险箱可随 SKILL 文件夹同步到别的设备，但没有主密钥解不开（文件夹泄露 ≠ 凭据泄露）
 - AI 不会在对话里重复你的密码

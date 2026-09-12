@@ -48,13 +48,9 @@ NS_ATOM = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/sch
 # ==================== 凭据 ====================
 
 def _get_key(key):
-    """从 campus keyring 读凭据明文（不存在返回空串）。"""
-    stored = creds._load_creds()
-    raw = stored.get(key, "")
-    if not raw:
-        return ""
+    """从凭据保险箱取明文（统一走 vault.vault_get）。"""
     try:
-        return vault.vault_decrypt(key, raw)
+        return vault.vault_get(key)
     except Exception:
         return ""
 

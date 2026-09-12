@@ -143,7 +143,7 @@ Step 5: 全部就绪 → 告诉用户"已初始化完成，可以说'查看待�
 | `deepseek_api_key` | ⬜ | DeepSeek API Key | learn 预批改 / 文献摘要（可选） |
 | `MAIL_ACCOUNTS` | ⬜ | 邮箱 IMAP/SMTP 授权码（写 campus/.env） | 收发邮件（mail） |
 
-**索取铁律（隐私）**：账号密码必须经 `creds.py add <key> --value-stdin` 的 stdin 直传（只走内存 → keyring DPAPI 加密），禁止先写临时 JSON/文件再读。展示时脱敏（学号 `202***`，密码绝不显示）。
+**索取铁律（隐私）**：账号密码必须经 `creds.py add <key> --value-stdin` 的 stdin 直传（只走内存 → 写入加密保险箱 `credentials.enc`），禁止先写临时 JSON/文件再读。展示时脱敏（学号 `202***`，密码绝不显示）。
 
 ## 路由逻辑（本技能只做路由 + 凭据门槛，业务在各子技能）
 

@@ -37,17 +37,34 @@ def main():
     results["platform"] = p
     common.log(f"[smoke] platform={p}")
 
-    # 2. vault 加密往返（多 key 隔离）
+    # 2. vault 加解密往返（单文件保险箱，用临时文件避免污染真实凭据）
     try:
-        probes = {"k1": "甲", "k2": "乙"}
-        ok = True
-        for k, v in probes.items():
-            enc = vault.vault_encrypt(k, v)
-            ok &= (vault.vault_decrypt(k, enc) == v)
-        enc1 = vault.vault_encrypt("k1", "AAA")
-        enc2 = vault.vault_encrypt("k2", "BBB")
-        ok &= (vault.vault_decrypt("k1", enc1) == "AAA" and vault.vault_decrypt("k2", enc2) == "BBB")
-        results["vault"] = {"ok": ok, "backend": "keyring" if vault._keyring_ok() else "fernet-fallback"}
+        tmpvault = os.path.join(tempfile.gettempdir(), "campus_smoke_vault.enc")
+        tmplegacy = os.path.join(tempfile.gettempdir(), "campus_smoke_legacy.json")
+        for f in (tmpvault, tmplegacy):
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+        _ov, _ol = vault.VAULT_FILE, vault.LEGACY_FILE
+        vault.VAULT_FILE, vault.LEGACY_FILE = tmpvault, tmplegacy
+        try:
+            probes = {"k1": "甲", "k2": "乙"}
+            vault.vault_write(probes)
+            got = vault.vault_read()
+            ok = all(got.get(k) == v for k, v in probes.items())
+            vault.vault_set("k1", "AAA")
+            vault.vault_set("k2", "BBB")
+            ok &= (vault.vault_get("k1") == "AAA" and vault.vault_get("k2") == "BBB")
+        finally:
+            vault.VAULT_FILE, vault.LEGACY_FILE = _ov, _ol
+            for f in (tmpvault, tmplegacy):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+        results["vault"] = {"ok": ok, "master_key_source": vault.master_key_source(),
+                            "keyring_ok": vault._keyring_ok()}
         ok_all &= ok
     except Exception as e:
         results["vault"] = {"ok": False, "error": str(e)[:150]}

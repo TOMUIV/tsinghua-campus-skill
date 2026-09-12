@@ -20,7 +20,7 @@ metadata:
 - **铁律 1：AI 运行所有脚本**。禁止让用户敲命令。
 - **铁律 2：脚本面向 AI**。stdout 输出 JSON，进度写 `runtime/logs/campus.log`，不写 stderr。
 - **铁律 3：凭据分流**。
-  - Scopus 凭据走 **campus keyring**（`creds.py add scopus_api_key --value-stdin`），与 agent 项目 `.env` 解耦
+  - Scopus 凭据走 **campus 凭据保险箱**（`creds.py add scopus_api_key --value-stdin`），与 agent 项目 `.env` 解耦
   - OpenAlex 凭据走 **统一 .env** 的 `OPENALEX_API_KEY`（可选，强烈建议）
   - arXiv / Crossref 免费，无需凭据
 - **铁律 4：多源默认行为**。`search` 不指定 `--source` 默认 `scopus`（保持向后兼容）。**用户未配 scopus_key 时**自动 fallback：OpenAlex/Crossref 免费源即可用。
@@ -31,7 +31,7 @@ metadata:
 
 | 源 | 凭据 | 覆盖 | 优势 | 局限 |
 |----|------|------|------|------|
-| **Scopus** | `scopus_api_key`（keyring）| 全学科（生物医学偏弱）| 权威、引用准确、机构 token 提配额 | 付费；清华 IP 受限 |
+| **Scopus** | `scopus_api_key`（保险箱）| 全学科（生物医学偏弱）| 权威、引用准确、机构 token 提配额 | 付费；清华 IP 受限 |
 | **arXiv** | 无 | 物理/数学/CS/生物/统计 | 预印本时效强、含摘要 | 无中文论文；无引用数据 |
 | **OpenAlex** | `OPENALEX_API_KEY`（.env，可选）| 全学科，2 亿+ 篇元数据 | 免费、引用/主题/开放访问都有 | 部分元数据 abstract 仅 inverted index（已自动重排）|
 | **Crossref** | 无 | DOI 注册的学术论文 | 元数据准确（出版商一手）| 部分论文无摘要（依赖出版商） |

@@ -8,7 +8,7 @@
 | 模块 | 路径 | 状态 |
 |------|------|------|
 | 底座 install | `skill/campus/install/` | ✅ 环境安装（腾讯云镜像） |
-| 底座 creds | `skill/campus/creds/` | ✅ 统一凭据（keyring 加密 + 责任告知） |
+| 底座 creds | `skill/campus/creds/` | ✅ 统一凭据（加密保险箱 + 单主密钥 + 责任告知） |
 | 底座 base-cas | `skill/campus/base-cas/` | ✅ CDP 登录 + 两阶段 2FA + 多系统 |
 | 主 SKILL | `skill/campus/SKILL.md` | ✅ 路由 |
 | learn 网络学堂 | `skill/campus/learn/` | ✅ 完整（登录/待办/课件/作业） |

@@ -84,15 +84,5 @@ def get_username():
 
 
 def _get_cred(key):
-    p = os.path.join(str(common.runtime_dir()), "credentials.json")
-    if not os.path.exists(p):
-        return ""
-    try:
-        with open(p, encoding="utf-8") as f:
-            stored = json.load(f)
-        raw = stored.get(key, "")
-        if raw:
-            return vault.vault_decrypt(key, raw)
-    except Exception:
-        pass
-    return ""
+    """从凭据保险箱取明文（统一走 vault.vault_get）。"""
+    return vault.vault_get(key)

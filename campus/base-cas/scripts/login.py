@@ -73,19 +73,9 @@ PENDING_TTL = 300  # 验证码等待超时（秒）
 RESULT_WAIT = 90   # submit-code 后等待登录完成上限
 
 
-def _load_creds():
-    if not os.path.exists(CREDS_FILE):
-        return {}
-    with open(CREDS_FILE, encoding="utf-8") as f:
-        return json.load(f)
-
-
 def _get_cred(key):
-    stored = _load_creds()
-    raw = stored.get(key, "")
-    if not raw:
-        return ""
-    return vault.vault_decrypt(key, raw)
+    """从凭据保险箱取明文（统一走 vault.vault_get）。"""
+    return vault.vault_get(key)
 
 
 def _pending_path(token):

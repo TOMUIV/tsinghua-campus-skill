@@ -1,6 +1,8 @@
 """creds.py — 技能包统一凭据管理
 
-单一凭据文件（skill/campus/runtime/credentials.json），所有子 SKILL 共用。
+单一加密保险箱（skill/campus/runtime/credentials.enc），所有子 SKILL 共用。
+凭据整体加密，解密只需一个主密钥（环境变量 CAMPUS_MASTER_KEY / OS keyring / 密钥文件）。
+
 每条凭据有元数据（用途/获取方式/影响范围/是否已配），支持查询与责任告知。
 
 CLI:
@@ -9,6 +11,7 @@ CLI:
   creds.py add <key> --value-stdin → 添加/更新凭据（stdin 传入，不进命令行）
   creds.py remove <key> --confirm  → 删除凭据（需 --confirm）
   creds.py verify <key>            → 校验某凭据是否已配
+  creds.py key show|set|source     → 主密钥管理（跨机同步用）
 
 约定:
 - 密码/密钥一律走 --value-stdin，禁止出现在命令行参数（防进程列表泄露）
@@ -23,8 +26,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "shared", "scripts"))
 import common
 import vault
-
-CREDS_FILE = str(common.runtime_dir("credentials.json"))
 
 # ============ 凭据 schema（元数据 = 责任告知） ============
 # 每个子 SKILL 需要哪些凭据写在这里；value 只存密文，不进本文件
@@ -97,16 +98,12 @@ CRED_SCHEMA = {
 
 
 def _load_creds():
-    if os.path.exists(CREDS_FILE):
-        with open(CREDS_FILE, encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+    """读凭据保险箱（无箱返回 {}；解不开抛 vault.VaultLocked）。"""
+    return vault.vault_read()
 
 
 def _save_creds(data):
-    os.makedirs(os.path.dirname(CREDS_FILE), exist_ok=True)
-    with open(CREDS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    vault.vault_write(data)
 
 
 def _mask(v):
@@ -116,7 +113,12 @@ def _mask(v):
 
 
 def cmd_status():
-    stored = _load_creds()
+    locked = None
+    try:
+        stored = _load_creds()
+    except vault.VaultLocked as e:
+        stored = {}
+        locked = str(e)
     # 按系统域分组展示
     systems = {}
     for key, meta in CRED_SCHEMA.items():
@@ -140,7 +142,10 @@ def cmd_status():
         "all_configured": configured == len(rows),
         "systems": systems,
         "creds": rows,
-        "creds_file": CREDS_FILE,
+        "vault_file": vault.VAULT_FILE,
+        "vault_locked": locked,
+        "master_key_source": vault.master_key_source(),
+        "master_key_env": vault.MASTER_KEY_ENV,
         "guide": "creds.py guide [system] 查看各系统凭据说明",
     })
 
@@ -185,10 +190,16 @@ def cmd_add(key, value):
     if not value:
         common.output_json({"status": "error", "message": "value 为空（用 --value-stdin 传值）"})
         sys.exit(1)
-    stored = _load_creds()
-    stored[key] = vault.vault_encrypt(key, value)
+    try:
+        stored = _load_creds()
+    except vault.VaultLocked as e:
+        common.output_json({"status": "error", "locked": True, "message": str(e)})
+        sys.exit(1)
+    stored[key] = value
     _save_creds(stored)
-    common.output_json({"status": "ok", "key": key, "masked": _mask(value), "message": "已加密保存"})
+    common.output_json({"status": "ok", "key": key, "masked": _mask(value),
+                        "master_key_source": vault.master_key_source(),
+                        "message": "已加密保存"})
 
 
 def cmd_remove(key):
@@ -205,17 +216,52 @@ def cmd_remove(key):
 
 
 def cmd_verify(keys):
-    stored = _load_creds()
+    try:
+        stored = _load_creds()
+    except vault.VaultLocked as e:
+        common.output_json({"status": "error", "locked": True, "message": str(e)})
+        sys.exit(1)
     result = {}
     for key in keys:
-        raw = stored.get(key, "")
-        try:
-            dec = vault.vault_decrypt(key, raw) if raw else ""
-            ok = bool(dec)
-        except Exception:
-            ok = False
+        dec = stored.get(key, "")
+        ok = bool(dec)
         result[key] = {"configured": ok, "masked": _mask(dec) if ok else ""}
     common.output_json({"status": "ok", "verify": result})
+
+
+def cmd_key(action, value=None):
+    """主密钥管理（跨机同步用）。
+
+    show   → 显示当前主密钥（敏感：用于把同一密钥带到其他设备）
+    set    → 显式设置主密钥（写 keyring 或密钥文件）
+    source → 显示主密钥来源与保险箱路径
+    """
+    if action == "show":
+        mk, src = vault.get_master_key(create=False)
+        if not mk:
+            common.output_json({"status": "error", "message": "尚无主密钥（先配置一次凭据）"})
+            sys.exit(1)
+        common.output_json({
+            "status": "ok", "source": src, "master_key": mk,
+            "env": vault.MASTER_KEY_ENV,
+            "hint": f"在其他设备设环境变量 {vault.MASTER_KEY_ENV}=<此值>，即可解密同步过来的保险箱",
+        })
+    elif action == "set":
+        if not value:
+            common.output_json({"status": "error", "message": "需 --value-stdin 传主密钥"})
+            sys.exit(1)
+        where = vault.set_master_key(value)
+        common.output_json({
+            "status": "ok", "stored_at": where,
+            "hint": f"跨机同步请在每台设备设环境变量 {vault.MASTER_KEY_ENV}=<同一值>",
+        })
+    else:
+        common.output_json({
+            "status": "ok",
+            "source": vault.master_key_source(),
+            "env": vault.MASTER_KEY_ENV,
+            "vault_file": vault.VAULT_FILE,
+        })
 
 
 def cmd_reset_system(system):
@@ -225,21 +271,16 @@ def cmd_reset_system(system):
                             "known_systems": list(SYSTEMS_META.keys())})
         sys.exit(1)
     keys = [k for k, m in CRED_SCHEMA.items() if m.get("system") == system]
-    stored = _load_creds()
+    try:
+        stored = _load_creds()
+    except vault.VaultLocked as e:
+        common.output_json({"status": "error", "locked": True, "message": str(e)})
+        sys.exit(1)
     removed = []
     for k in keys:
-        raw = stored.get(k, "")
-        if not raw:
-            continue
-        if raw.startswith("keyring:"):
-            ref = raw[len("keyring:"):]
-            try:
-                import keyring
-                keyring.delete_password("campus-skill", ref)
-            except Exception:
-                pass
-        del stored[k]
-        removed.append(k)
+        if k in stored:
+            del stored[k]
+            removed.append(k)
     if removed:
         _save_creds(stored)
     common.output_json({
@@ -268,6 +309,9 @@ def main():
     rs.add_argument("--confirm", action="store_true")
     v = sub.add_parser("verify")
     v.add_argument("keys", nargs="+")
+    k = sub.add_parser("key", help="主密钥管理（跨机同步用）")
+    k.add_argument("action", choices=["show", "set", "source"])
+    k.add_argument("--value-stdin", action="store_true")
     args = ap.parse_args()
 
     if not args.cmd:
@@ -298,6 +342,15 @@ def main():
         cmd_reset_system(args.system)
     elif args.cmd == "verify":
         cmd_verify(args.keys)
+    elif args.cmd == "key":
+        value = None
+        if args.action == "set":
+            value = sys.stdin.read() if args.value_stdin else None
+            if value:
+                value = value.rstrip("\r\n")
+                while value.startswith("\ufeff"):
+                    value = value[1:]
+        cmd_key(args.action, value)
 
 
 if __name__ == "__main__":
