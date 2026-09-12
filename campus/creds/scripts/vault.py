@@ -300,6 +300,28 @@ def _legacy_decrypt(key, ref):
         return ""
 
 
+def purge_legacy_keyring(keys):
+    """删除旧的 per-credential keyring 条目（值已在保险箱里，避免明文冗余副本）。
+
+    旧格式 account = "campus:<key>"（较新）或 "campus"（更旧的共享条目）。
+    返回删除条数。
+    """
+    if not _keyring_ok():
+        return 0
+    import keyring
+    removed = 0
+    for acc in [f"campus:{k}" for k in keys] + ["campus"]:
+        try:
+            if keyring.get_password(KEYRING_SERVICE, acc):
+                keyring.delete_password(KEYRING_SERVICE, acc)
+                removed += 1
+        except Exception:
+            pass
+    if removed:
+        common.log(f"[vault] 已清理旧 keyring 条目 {removed} 条")
+    return removed
+
+
 def _migrate_legacy():
     """把旧 credentials.json 迁进新保险箱（仅当新箱不存在时）。"""
     if os.path.exists(VAULT_FILE) or not os.path.exists(LEGACY_FILE):
@@ -319,6 +341,8 @@ def _migrate_legacy():
     if not data:
         return
     vault_write(data)
+    # 清理旧 keyring 条目（已复制进保险箱，去掉明文冗余副本）
+    purge_legacy_keyring(list(stored.keys()))
     try:
         os.replace(LEGACY_FILE, LEGACY_FILE + ".migrated")
     except Exception:

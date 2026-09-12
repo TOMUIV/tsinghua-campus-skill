@@ -283,6 +283,8 @@ def cmd_reset_system(system):
             removed.append(k)
     if removed:
         _save_creds(stored)
+    # 顺带清掉旧版 per-credential keyring 冗余条目（值已不在 keyring）
+    vault.purge_legacy_keyring(keys)
     common.output_json({
         "status": "ok",
         "system": system,
