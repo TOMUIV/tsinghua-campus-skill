@@ -182,6 +182,11 @@ Step 5: 全部就绪 → 告诉用户"已初始化完成，可以说'查看待�
 
 本技能所有 CDP 脚本共用**同一个**无头 Chromium 实例（端口记录在 `campus/runtime/browser/cdp.port`）。**运行任何脚本前**：
 
+> 🆕 **2026-09-16 起 base-cas 自带跨进程互斥锁**（`browser.py` 的 `acquire_run_lock()`，锁文件 `runtime/browser/campus.lock`）：
+> 并行的两个脚本会**自动排队**（默认等 600s，`CAMPUS_BROWSER_LOCK_TIMEOUT` 可调；超时报 `error=browser_busy`），
+> 不会再互踩成「CAS 用户名或密码不正确」；`learn.py → login.py` 这类**子进程通过环境变量继承锁**，不会自锁死。
+> 下面的手工检查仍然值得做——排队意味着**长任务仍会互相等待**，能串行就别并行。
+
 1. **检查**：`python campus/base-cas/scripts/browser.py --check` → 看 `cdp_running`。
 2. **干净**（`cdp_running: false`）→ 可以启动脚本。
 3. **不干净**（`cdp_running: true`）→ **禁止直接跑业务脚本**，先排查：

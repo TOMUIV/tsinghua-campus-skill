@@ -32,24 +32,78 @@ def _playwright():
         return None
 
 
+def _shared_resolver():
+    """调用 skills/_shared/opencode_paths.py 的统一浏览器解析器（全仓库唯一实现）。
+
+    技能包若被拷出 skills/ 目录（不在 _shared 旁）则返回 None，由本模块兜底。"""
+    for parent in list(Path(__file__).resolve().parents)[:8]:
+        cand = parent / "_shared" / "opencode_paths.py"
+        if cand.is_file():
+            if str(cand.parent) not in sys.path:
+                sys.path.insert(0, str(cand.parent))
+            try:
+                import opencode_paths
+                return opencode_paths.chromium()
+            except Exception:
+                return None
+    return None
+
+
 def chromium_executable():
-    """定位本机 Chromium 可执行文件。Windows/macOS/Linux 都找 Playwright 缓存。"""
+    """定位本机 Chromium。
+
+    顺序：① 统一解析器（_shared/opencode_paths.py：env → Playwright 自报 → 各安装根 glob）
+          ② 本模块兜底 glob（技能包被拷出 skills/ 时用；已覆盖 chrome-linux64/chrome-win64）
+    """
+    exe = _shared_resolver()
+    if exe and os.path.isfile(exe):
+        return exe
+
+    exe = os.environ.get("OPENCODE_CHROMIUM") or os.environ.get("CHROME_PATH")
+    if exe and os.path.isfile(exe):
+        return exe
     plat = common.detect_platform()
     import glob
     home = str(Path.home())
+    roots = []
+    if os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
+        roots.append(os.environ["PLAYWRIGHT_BROWSERS_PATH"])
+    data = os.environ.get("OPENCODE_DATA_DIR") or str(Path.home() / ".local" / "share" / "opencode")
+    roots.append(os.path.join(data, "chromium"))
     if plat == "windows":
-        pats = [rf"C:\Users\*\AppData\Local\ms-playwright\chromium-*\chrome-win64\chrome.exe",
-                rf"C:\Users\*\AppData\Local\ms-playwright\chromium-*\chrome-win\chrome.exe"]
+        roots.append(os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local"))
+        pats = []
+        for r in roots:
+            pats += [os.path.join(r, "chromium-*", "chrome-win64", "chrome.exe"),
+                     os.path.join(r, "chromium-*", "chrome-win", "chrome.exe"),
+                     os.path.join(r, "ms-playwright", "chromium-*", "chrome-win64", "chrome.exe"),
+                     os.path.join(r, "ms-playwright", "chromium-*", "chrome-win", "chrome.exe")]
     elif plat == "macos":
-        pats = [f"{home}/Library/Caches/ms-playwright/chromium-*/chrome-mac/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-                f"{home}/Library/Caches/ms-playwright/chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium"]
+        pats = [f"{home}/Library/Caches/ms-playwright/chromium-*/chrome-mac*/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+                f"{home}/Library/Caches/ms-playwright/chromium-*/chrome-mac*/Chromium.app/Contents/MacOS/Chromium"]
+        for r in roots:
+            pats += [os.path.join(r, "chromium-*", "chrome-mac*", "Chromium.app", "Contents", "MacOS", "Chromium"),
+                     os.path.join(r, "ms-playwright", "chromium-*", "chrome-mac*", "Chromium.app", "Contents", "MacOS", "Chromium")]
     else:
-        pats = [f"{home}/.cache/ms-playwright/chromium-*/chrome-linux/chrome"]
+        pats = [f"{home}/.cache/ms-playwright/chromium-*/chrome-linux64/chrome",
+                f"{home}/.cache/ms-playwright/chromium-*/chrome-linux/chrome"]
+        for r in roots:
+            pats += [os.path.join(r, "chromium-*", "chrome-linux64", "chrome"),
+                     os.path.join(r, "chromium-*", "chrome-linux", "chrome"),
+                     os.path.join(r, "openclaw-browser")]
     for pat in pats:
         cands = sorted(glob.glob(pat))
         if cands:
-            return cands[0]
+            return cands[-1]
     return None
+
+
+def _default_profile():
+    """profile 路径用环境变量索引（OPENCODE_CHROMIUM_PROFILE），否则回退 skill runtime。"""
+    root = os.environ.get("OPENCODE_CHROMIUM_PROFILE")
+    if root:
+        return os.path.join(root, "tsinghua_cdp_profile")
+    return str(common.runtime_dir("profiles", "cdp_profile"))
 
 
 def _cdp_dir():
@@ -62,6 +116,88 @@ def _pid_file():
 
 def _port_file():
     return os.path.join(str(_cdp_dir()), "cdp.port")
+
+
+# ---- 跨进程互斥锁：同一时刻只允许一个脚本操作共享 Chromium（2026-09-16） ----
+# 背景：全部 CDP 脚本共用同一个常驻 Chromium，且 connect_cdp() 复用 context.pages[0]。
+# 两个脚本并行 → 抢同一个标签页 → CAS 登录表单被重复提交 → CAS 回通用错误
+# 「用户名或密码不正确」，两个进程一起失败（曾导致 cron 的两步都返回 status=error）。
+# 本锁把「并行」降级为「串行排队」，对齐 SKILL.md 的"严禁两个 CDP 脚本并行，全部串行执行"。
+_LOCK_FD = None
+_LOCK_ENV = "CAMPUS_BROWSER_LOCK"   # 子进程继承此变量即视为「已持锁」，避免父等子、子抢父的自锁死
+
+
+def _lock_timeout():
+    try:
+        return float(os.environ.get("CAMPUS_BROWSER_LOCK_TIMEOUT") or 600)
+    except Exception:
+        return 600.0
+
+
+def _lock_file():
+    return os.path.join(str(_cdp_dir()), "campus.lock")
+
+
+def _lock_inherited():
+    """父进程已持锁并 fork 出本进程（如 learn.py 子调用 login.py）→ 直接视为已持锁。
+
+    flock/msvcrt 锁不可跨进程重入：父持锁等子进程、子进程再抢同一把锁 = 自锁死。
+    """
+    return os.environ.get(_LOCK_ENV) == _lock_file()
+
+
+def acquire_run_lock(timeout=None):
+    """获取共享浏览器的跨进程互斥锁。可重入（本进程已持锁 / 子进程继承）→ 直接 True。
+
+    拿不到（超时）返回 False，由调用方报错。锁随进程退出由 OS 自动释放，不留死锁。
+    """
+    global _LOCK_FD
+    if _LOCK_FD is not None or _lock_inherited():
+        return True
+    path = _lock_file()
+    try:
+        _cdp_dir().mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        if os.fstat(fd).st_size == 0:
+            os.write(fd, b"0")
+        os.lseek(fd, 0, os.SEEK_SET)
+    except Exception:
+        # 锁文件不可用（runtime 只读 / 权限）→ 退回旧行为，不因锁本身打断脚本
+        return True
+    deadline = time.time() + (timeout if timeout is not None else _lock_timeout())
+    while True:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _LOCK_FD = fd
+            os.environ[_LOCK_ENV] = path
+            common.log("[browser] 已获得共享浏览器互斥锁")
+            return True
+        except OSError:
+            if time.time() >= deadline:
+                try:
+                    os.close(fd)
+                except Exception:
+                    pass
+                return False
+            time.sleep(1)
+
+
+def _require_run_lock():
+    """拿不到锁 → 输出 JSON 错误并退出（脚本间串行，不静默降级回并行）。"""
+    if acquire_run_lock():
+        return
+    common.output_json({
+        "status": "error",
+        "error": "browser_busy",
+        "message": "另一个校园脚本正在使用共享浏览器，等待 %d 秒仍未释放。请串行执行"
+                   "（不要并行跑两个 campus 脚本，也不要把两条命令拆成并行的两次 exec）。" % int(_lock_timeout()),
+    })
+    sys.exit(1)
 
 
 def _save_port(port):
@@ -203,11 +339,13 @@ def start_cdp(headed=False, profile=None, extra_args=None):
     extra_args: 额外 Chrome 启动参数（如移除 --disable-blink-features=AutomationControlled
                 以解决某些站点 ERR_BLOCKED_BY_CLIENT）。
     """
+    _require_run_lock()
+
     # 孤儿清理：端口有响应但 pid 不匹配 → 杀掉残留进程
     if is_running():
         pid = _load_pid()
         if _pid_alive(pid):
-            return _load_port(), (profile or str(common.runtime_dir("profiles", "cdp_profile")))
+            return _load_port(), (profile or _default_profile())
         common.log("[browser] 检测到孤儿浏览器（端口响应但进程不匹配），清理")
         _kill_port_process(_load_port())
         try:
@@ -219,7 +357,7 @@ def start_cdp(headed=False, profile=None, extra_args=None):
     if not exe:
         raise RuntimeError("Chromium 未找到，先运行 install 模块")
 
-    profile_path = profile or str(common.runtime_dir("profiles", "cdp_profile"))
+    profile_path = profile or _default_profile()
     os.makedirs(profile_path, exist_ok=True)
 
     # 选一个当前空闲端口
@@ -275,6 +413,7 @@ def _cdp_ready(port):
 
 def connect_cdp(port=None):
     """通过 CDP 连接常驻浏览器。返回 (pw, browser, context, page)。"""
+    _require_run_lock()
     sp = _playwright()
     if sp is None:
         raise RuntimeError("playwright 未安装，先运行 install 模块")
