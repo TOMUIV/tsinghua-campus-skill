@@ -31,7 +31,7 @@ metadata:
 
 ### ⚠️ 版本与自修声明（完整版见根 `SKILL.md` 新手指引 Caveat）
 
-- 本技能包仍在迭代中，主功能已测试可用（learn/search/literature/timetable/transcript/program/course/ts2/library/mail/info/amap）
+- 本技能包仍在迭代中，主功能已测试可用（learn/search/literature/timetable/transcript/program/course/ts2/library/mail/info/amap/madmodel）
 - 遇到 bug（脚本报错/接口变更/登录失效）时，**AI 可自行修改本包代码修复**，不必等用户
 - 约束：只改出问题的模块，**禁止动已测试通过的核心路径**（install/creds/base-cas 底座）
 - 回归：修复后跑 `tests/smoke_test.py` + 实测一次真实数据
@@ -74,6 +74,7 @@ metadata:
   校内通知   → info SKILL（子）
   图书馆座位 → library SKILL（子）
   地图/POI/路径/天气/地理编码 → amap SKILL（子）
+  MAD 大模型 / 清华 Deepseek / 校内推理 → madmodel SKILL（子，独立模块）
   校内通知   → info SKILL（子）
   意图不明   → 列出能力范围，不瞎猜
 ```
@@ -172,6 +173,7 @@ Step 5: 全部就绪 → 告诉用户"已初始化完成，可以说'查看待�
 | mail | `mail/` | 收发邮件（配置在统一 campus/.env） | ✅ 已实现 |
 | info | `info/` | 校内通知查询 + 水木搜索（馆藏检索） | ✅ 已实现 |
 | amap | `amap/` | 高德地图（地点/POI/周边/路径规划/地理编码/天气/IP/行政区划/距离/静态地图） | ✅ 已实现 |
+| madmodel | `madmodel/` | 清华 MAD 大模型（模型列表 + token 取/刷新 + 对话 + 本地 OpenAI 兼容代理）；**独立模块**，只依赖 base-cas/creds/common | ✅ 已实现（实验） |
 
 > `course` 选课系统：登录链路已逆向（含验证码两阶段），`enrolled` 已选课程可用；开课信息/评教按学期开放，非选课季锁定。完整逆向笔记见 `../docs/course-reverse-notes.md`（供后续同学接手）。
 > 第二成绩单（`ts2/`）已实现：课外经历 19 模块查询 + 填报状态，直连无需 webvpn，全年可用。
