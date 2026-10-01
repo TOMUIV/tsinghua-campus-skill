@@ -165,8 +165,11 @@ Step 5: 全部就绪 → 告诉用户"已初始化完成，可以说'查看待�
   校内通知     → info SKILL（子）
   搜校园信息   → search SKILL（子）
   地图/POI/路径/天气 → amap SKILL（子）
+  校内大模型（MAD：DeepSeek/qwen/R1）· 需要 LLM 后端（含跑评测/基准） → madmodel SKILL（子）
   意图不明     → 列出能力范围，不瞎猜
 ```
+
+> 说明：`madmodel` 是**校内 LLM 服务**（OpenAI 兼容）。任何需要模型的场景——对话、批量抽取、**跑需要 LLM 后端的评测（如 SWE-bench 之类）**——都可用它做后端（`serve` 起本地 `http://127.0.0.1:<port>/v1`）。
 
 完整路由、凭据门槛、子技能清单见 `campus/SKILL.md`（主技能）。
 

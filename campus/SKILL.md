@@ -74,7 +74,7 @@ metadata:
   校内通知   → info SKILL（子）
   图书馆座位 → library SKILL（子）
   地图/POI/路径/天气/地理编码 → amap SKILL（子）
-  MAD 大模型 / 清华 Deepseek / 校内推理 → madmodel SKILL（子，独立模块）
+  MAD / 清华 Deepseek / 校内 LLM 服务（OpenAI 兼容；可作对话·批量抽取·**需要模型的评测/基准**的后端） → madmodel SKILL（子，独立模块）
   校内通知   → info SKILL（子）
   意图不明   → 列出能力范围，不瞎猜
 ```

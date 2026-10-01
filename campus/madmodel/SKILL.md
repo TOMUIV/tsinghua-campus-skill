@@ -1,6 +1,6 @@
 ---
 name: campus-madmodel
-description: 清华大学 MAD 大模型服务（madmodel.cs.tsinghua.edu.cn，Deepseek/R1/qwen 校内推理）。查看可用模型、取/刷新调用 token、直接对话、或起一个本地 OpenAI 兼容代理。当用户需要"用清华的 Deepseek、madmodel、校内大模型、DeepSeek-V4.1-Flash、qwen3.8-27b、DeepSeek-R1-W8A8、拿 MAD token、本地 OpenAI 代理"时使用。
+description: 清华大学 MAD **校内 LLM 服务**（madmodel.cs.tsinghua.edu.cn，DeepSeek-V4.1-Flash / qwen3.8-27b / DeepSeek-R1-W8A8），OpenAI 兼容。既是对话服务，也是**任意任务的模型后端**——对话、批量抽取、**跑需要 LLM 后端的评测/基准**（起本地 `/v1` 端点即可）。当用户需要"用清华的 Deepseek、校内大模型/LLM 服务、madmodel、DeepSeek-V4.1-Flash、qwen3.8-27b、DeepSeek-R1-W8A8、拿 MAD token、给评测/基准配模型后端、本地 OpenAI 代理"时使用。
 metadata:
   openclaw:
     requires:
@@ -47,6 +47,16 @@ python scripts/madmodel.py chat --prompt "用一句话介绍清华" --model Deep
 python scripts/madmodel.py chat --prompt "数到3" --stream
 python scripts/madmodel.py serve --port 18720   # 起本地 OpenAI 兼容代理（独立可用）
 ```
+
+### 作为「通用 LLM 后端」（供其它任务 / 评测 / 基准）
+本模块不只是聊天：它是**校内 OpenAI 兼容 LLM 服务**。任何需要模型后端的场景都可直接用：
+```bash
+python scripts/madmodel.py serve --port 18720     # 起本地端点
+# 其它程序把 base_url 设为 http://127.0.0.1:18720/v1，api_key 随意（无需）
+```
+- 例：**跑需要 LLM 的评测（SWE-bench 之类的 agent/基准）** → 让评测的模型后端指向上面这个本地端点即可；
+  评测真正缺的是**评测环境**（代码库/harness/Docker/数据），**模型后端由本模块提供**，两者不矛盾。
+- 也可一次性调用：`madmodel.py chat --prompt ...`（脚本化）。
 
 ### 可用模型
 | model | 思考开关 | 强度 reasoning_effort | 思考字段 | 视觉 | 上下文 |
